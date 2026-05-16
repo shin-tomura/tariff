@@ -1,0 +1,4 @@
+flutter_launcher_icons:
+  image_path: "assets/icon/icon1024.png" # 作成した1024x1024の画像パス
+  ios: true
+  android: true

@@ -1,0 +1,6 @@
+flutter_native_splash:
+  color: "#000000" # 背景色
+  image: "assets/icon/icon512.png" # 中央に表示したいロゴ画像のパス
+
+  ios: true
+  android: true
