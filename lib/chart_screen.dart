@@ -19,6 +19,23 @@ class _ChartScreenState extends State<ChartScreen> {
   Set<String> _visibleCountries = {};
   bool _isInitialized = false;
 
+  // 各チャートのY軸でマイナス値を許可するかどうかの設定
+  final Map<String, bool> _allowNegativeY = {
+    'Currency Strength Index (Calculated Base)': false,
+    'Net Trade Balance (Local Currency)': true,
+    'Gross Trade Volume (Base Currency Eq.)': false,
+    'AMM Liquidity Pool (Local Currency)': false,
+    'Total Domestic Money (Local Currency)': false,
+    'Wealth Gini Index (0.0 = Equal, 1.0 = Unequal)': false,
+    'Average HWI (Holistic Welfare Index)': false, // ★追加
+    'Average Weight (Health / Hunger Proxy)': false,
+    'Average Civilization Level': false,
+    'Food Market Price (Local Currency)': false,
+    'Wood Market Price (Local Currency)': false,
+    'Metal Market Price (Local Currency)': false,
+    'Oil Market Price (Local Currency)': false,
+  };
+
   Color _getCountryColor(String id) {
     switch (id) {
       case 'USA':
@@ -104,7 +121,6 @@ class _ChartScreenState extends State<ChartScreen> {
               _buildChip('10 Yrs', 10),
               _buildChip('20 Yrs', 20),
               _buildChip('50 Yrs', 50),
-              // ★修正: All Time の代わりに 100 Yrs を最大表示期間に設定
               _buildChip('100 Yrs', 100),
             ],
           ),
@@ -203,6 +219,222 @@ class _ChartScreenState extends State<ChartScreen> {
     );
   }
 
+  Widget _buildTradeVolumeChart(
+    String title,
+    List<Country> visibleCountries,
+    List<Country> allCountries, {
+    int currentMaxYear = 1,
+  }) {
+    if (allCountries.isEmpty || allCountries.first.history.isEmpty) {
+      return _emptyCard(title);
+    }
+
+    int targetMaxYear =
+        _selectedEndYear == 0 || _selectedEndYear > currentMaxYear
+        ? currentMaxYear
+        : _selectedEndYear;
+
+    int minYearFilter = _selectedPeriod == 0
+        ? 1
+        : max(1, targetMaxYear - _selectedPeriod + 1);
+
+    double minY = double.infinity;
+    double maxY = double.negativeInfinity;
+    int actualMinX = targetMaxYear;
+    int actualMaxX = minYearFilter;
+
+    List<LineChartBarData> lineBars = [];
+    bool hasData = false;
+
+    // 1. 各国のライン (基軸通貨換算)
+    for (var country in visibleCountries) {
+      List<FlSpot> spots = [];
+      var filteredHistory = country.history
+          .where(
+            (h) =>
+                (h.year + 1) >= minYearFilter && (h.year + 1) <= targetMaxYear,
+          )
+          .toList();
+
+      for (var h in filteredHistory) {
+        hasData = true;
+        int displayYear = h.year + 1;
+        // ローカル通貨の総貿易量を、基軸通貨(USD相当)に換算してスケールを統一
+        double val = h.grossTradeVolume;
+
+        if (val < minY) minY = val;
+        if (val > maxY) maxY = val;
+        if (displayYear < actualMinX) actualMinX = displayYear;
+        if (displayYear > actualMaxX) actualMaxX = displayYear;
+
+        spots.add(FlSpot(displayYear.toDouble(), val));
+      }
+
+      lineBars.add(
+        LineChartBarData(
+          spots: spots,
+          isCurved: true,
+          preventCurveOverShooting: true,
+          color: _getCountryColor(country.id),
+          barWidth: 2,
+          isStrokeCapRound: true,
+          dotData: const FlDotData(show: false),
+          belowBarData: BarAreaData(show: false),
+        ),
+      );
+    }
+
+    // 2. 世界全体（World Total）のライン生成
+    List<FlSpot> worldSpots = [];
+    var baseHistory = allCountries.first.history
+        .where(
+          (h) => (h.year + 1) >= minYearFilter && (h.year + 1) <= targetMaxYear,
+        )
+        .toList();
+
+    for (int i = 0; i < baseHistory.length; i++) {
+      int displayYear = baseHistory[i].year + 1;
+      double worldTotal = 0.0;
+
+      for (var country in allCountries) {
+        // 全国の同年の記録を合算
+        var targetH = country.history.firstWhere(
+          (element) => element.year == baseHistory[i].year,
+          orElse: () => baseHistory[i],
+        );
+        worldTotal += targetH.grossTradeVolume;
+      }
+
+      if (worldTotal < minY) minY = worldTotal;
+      if (worldTotal > maxY) maxY = worldTotal;
+      worldSpots.add(FlSpot(displayYear.toDouble(), worldTotal));
+    }
+
+    if (worldSpots.isNotEmpty) {
+      lineBars.add(
+        LineChartBarData(
+          spots: worldSpots,
+          isCurved: true,
+          preventCurveOverShooting: true,
+          color: Colors.white, // 世界全体は白で目立たせる
+          barWidth: 3,
+          dashArray: [5, 5], // 破線スタイル
+          isStrokeCapRound: true,
+          dotData: const FlDotData(show: false),
+          belowBarData: BarAreaData(show: false),
+        ),
+      );
+    }
+
+    if (!hasData) return _emptyCard(title);
+
+    if (minY == maxY) {
+      minY -= 1;
+      maxY += 1;
+    } else {
+      double padding = (maxY - minY) * 0.1;
+      minY -= padding;
+      maxY += padding;
+    }
+
+    if (minY < 0) minY = 0.0; // 総貿易量はマイナスにならないためゼロクリッピング
+
+    if (actualMinX >= actualMaxX) {
+      actualMinX = max(1, actualMinX - 1);
+      actualMaxX += 1;
+    }
+
+    double xRange = (actualMaxX - actualMinX).toDouble();
+    double xInterval = max(1.0, (xRange / 5).floorToDouble());
+
+    return Card(
+      color: const Color(0xFF1E1E2C),
+      elevation: 4,
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              title,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 15,
+                fontWeight: FontWeight.bold,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 20),
+            AspectRatio(
+              aspectRatio: 1.5,
+              child: LineChart(
+                LineChartData(
+                  lineBarsData: lineBars,
+                  minY: minY,
+                  maxY: maxY,
+                  minX: actualMinX.toDouble(),
+                  maxX: actualMaxX.toDouble(),
+                  titlesData: _buildTitlesData(xInterval),
+                  gridData: _buildGridData(minY, maxY, xInterval),
+                  borderData: FlBorderData(
+                    show: true,
+                    border: Border.all(color: Colors.white24),
+                  ),
+                  lineTouchData: _buildTouchData(),
+                ),
+              ),
+            ),
+            const SizedBox(height: 15),
+            Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 16.0,
+              runSpacing: 4.0,
+              children: [
+                ...visibleCountries.map((c) {
+                  return Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Container(
+                        width: 12,
+                        height: 12,
+                        color: _getCountryColor(c.id),
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        c.id,
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 14,
+                        ),
+                      ),
+                    ],
+                  );
+                }).toList(),
+                // World Total用の凡例を追加
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(width: 16, height: 4, color: Colors.white),
+                    const SizedBox(width: 4),
+                    const Text(
+                      'World Total',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 14,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildLineChart(
     String title,
     List<Country> countries,
@@ -256,6 +488,7 @@ class _ChartScreenState extends State<ChartScreen> {
         LineChartBarData(
           spots: spots,
           isCurved: true,
+          preventCurveOverShooting: true,
           color: _getCountryColor(country.id),
           barWidth: 2,
           isStrokeCapRound: true,
@@ -265,9 +498,7 @@ class _ChartScreenState extends State<ChartScreen> {
       );
     }
 
-    if (!hasData) {
-      return _emptyCard(title);
-    }
+    if (!hasData) return _emptyCard(title);
 
     if (minY == maxY) {
       minY -= 1;
@@ -276,6 +507,11 @@ class _ChartScreenState extends State<ChartScreen> {
       double padding = (maxY - minY) * 0.1;
       minY -= padding;
       maxY += padding;
+    }
+
+    bool allowNegative = _allowNegativeY[title] ?? true;
+    if (!allowNegative && minY < 0) {
+      minY = 0.0;
     }
 
     if (actualMinX >= actualMaxX) {
@@ -305,7 +541,6 @@ class _ChartScreenState extends State<ChartScreen> {
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 20),
-
             AspectRatio(
               aspectRatio: 1.5,
               child: LineChart(
@@ -315,112 +550,13 @@ class _ChartScreenState extends State<ChartScreen> {
                   maxY: maxY,
                   minX: actualMinX.toDouble(),
                   maxX: actualMaxX.toDouble(),
-                  titlesData: FlTitlesData(
-                    show: true,
-                    topTitles: const AxisTitles(
-                      sideTitles: SideTitles(showTitles: false),
-                    ),
-                    rightTitles: const AxisTitles(
-                      sideTitles: SideTitles(showTitles: false),
-                    ),
-                    bottomTitles: AxisTitles(
-                      sideTitles: SideTitles(
-                        showTitles: true,
-                        reservedSize: 35,
-                        interval: xInterval,
-                        getTitlesWidget: (value, meta) {
-                          return Padding(
-                            padding: const EdgeInsets.only(top: 8.0),
-                            child: Text(
-                              'Yr ${value.toInt()}',
-                              style: const TextStyle(
-                                color: Colors.white54,
-                                fontSize: 11,
-                              ),
-                            ),
-                          );
-                        },
-                      ),
-                    ),
-                    leftTitles: AxisTitles(
-                      sideTitles: SideTitles(
-                        showTitles: true,
-                        reservedSize: 45,
-                        getTitlesWidget: (value, meta) {
-                          String text;
-                          if (value >= 1000000000000 ||
-                              value <= -1000000000000) {
-                            text =
-                                '${(value / 1000000000000).toStringAsFixed(1)}T';
-                          } else if (value >= 1000000000 ||
-                              value <= -1000000000) {
-                            text =
-                                '${(value / 1000000000).toStringAsFixed(1)}B';
-                          } else if (value >= 1000000 || value <= -1000000) {
-                            text = '${(value / 1000000).toStringAsFixed(1)}M';
-                          } else if (value >= 1000 || value <= -1000) {
-                            text = '${(value / 1000).toStringAsFixed(1)}k';
-                          } else if (value < 0.01 &&
-                              value > -0.01 &&
-                              value != 0) {
-                            text = value.toStringAsExponential(1);
-                          } else {
-                            text = value.toStringAsFixed(1);
-                          }
-                          return Text(
-                            text,
-                            style: const TextStyle(
-                              color: Colors.white54,
-                              fontSize: 10,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.visible,
-                          );
-                        },
-                      ),
-                    ),
-                  ),
-                  gridData: FlGridData(
-                    show: true,
-                    drawVerticalLine: true,
-                    horizontalInterval: (maxY - minY) / 4 > 0
-                        ? (maxY - minY) / 4
-                        : 1,
-                    verticalInterval: xInterval,
-                    getDrawingHorizontalLine: (value) {
-                      if (value == 0) {
-                        return const FlLine(
-                          color: Colors.white54,
-                          strokeWidth: 1.5,
-                        );
-                      }
-                      return const FlLine(
-                        color: Colors.white10,
-                        strokeWidth: 1,
-                      );
-                    },
-                    getDrawingVerticalLine: (value) =>
-                        const FlLine(color: Colors.white10, strokeWidth: 1),
-                  ),
+                  titlesData: _buildTitlesData(xInterval),
+                  gridData: _buildGridData(minY, maxY, xInterval),
                   borderData: FlBorderData(
                     show: true,
                     border: Border.all(color: Colors.white24),
                   ),
-                  lineTouchData: LineTouchData(
-                    touchTooltipData: LineTouchTooltipData(
-                      getTooltipItems: (touchedSpots) {
-                        return touchedSpots.map((spot) {
-                          return LineTooltipItem(
-                            'Yr ${spot.x.toInt()}\n${spot.y.toStringAsFixed(2)}',
-                            const TextStyle(
-                              color: Colors.white,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          );
-                        }).toList();
-                      },
-                    ),
-                  ),
+                  lineTouchData: _buildTouchData(),
                 ),
               ),
             ),
@@ -452,6 +588,92 @@ class _ChartScreenState extends State<ChartScreen> {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  // 共通のタイトルUI設定
+  FlTitlesData _buildTitlesData(double xInterval) {
+    return FlTitlesData(
+      show: true,
+      topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+      rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+      bottomTitles: AxisTitles(
+        sideTitles: SideTitles(
+          showTitles: true,
+          reservedSize: 35,
+          interval: xInterval,
+          getTitlesWidget: (value, meta) {
+            return Padding(
+              padding: const EdgeInsets.only(top: 8.0),
+              child: Text(
+                'Yr ${value.toInt()}',
+                style: const TextStyle(color: Colors.white54, fontSize: 11),
+              ),
+            );
+          },
+        ),
+      ),
+      leftTitles: AxisTitles(
+        sideTitles: SideTitles(
+          showTitles: true,
+          reservedSize: 45,
+          getTitlesWidget: (value, meta) {
+            String text;
+            if (value >= 1000000000000 || value <= -1000000000000) {
+              text = '${(value / 1000000000000).toStringAsFixed(1)}T';
+            } else if (value >= 1000000000 || value <= -1000000000) {
+              text = '${(value / 1000000000).toStringAsFixed(1)}B';
+            } else if (value >= 1000000 || value <= -1000000) {
+              text = '${(value / 1000000).toStringAsFixed(1)}M';
+            } else if (value >= 1000 || value <= -1000) {
+              text = '${(value / 1000).toStringAsFixed(1)}k';
+            } else if (value < 0.01 && value > -0.01 && value != 0) {
+              text = value.toStringAsExponential(1);
+            } else {
+              text = value.toStringAsFixed(1);
+            }
+            return Text(
+              text,
+              style: const TextStyle(color: Colors.white54, fontSize: 10),
+              maxLines: 1,
+              overflow: TextOverflow.visible,
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  // 共通のグリッドUI設定
+  FlGridData _buildGridData(double minY, double maxY, double xInterval) {
+    return FlGridData(
+      show: true,
+      drawVerticalLine: true,
+      horizontalInterval: (maxY - minY) / 4 > 0 ? (maxY - minY) / 4 : 1,
+      verticalInterval: xInterval,
+      getDrawingHorizontalLine: (value) {
+        if (value == 0)
+          return const FlLine(color: Colors.white54, strokeWidth: 1.5);
+        return const FlLine(color: Colors.white10, strokeWidth: 1);
+      },
+      getDrawingVerticalLine: (value) =>
+          const FlLine(color: Colors.white10, strokeWidth: 1),
+    );
+  }
+
+  // 共通のツールチップ設定
+  LineTouchData _buildTouchData() {
+    return LineTouchData(
+      touchTooltipData: LineTouchTooltipData(
+        getTooltipItems: (touchedSpots) {
+          return touchedSpots.map((spot) {
+            return LineTooltipItem(
+              'Yr ${spot.x.toInt()}\n${spot.y.toStringAsFixed(2)}',
+              const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+            );
+          }).toList();
+        },
       ),
     );
   }
@@ -501,6 +723,13 @@ class _ChartScreenState extends State<ChartScreen> {
             currentMaxYear: currentMaxYear,
           ),
 
+          _buildTradeVolumeChart(
+            'Gross Trade Volume (Real Volume Base)',
+            visibleCountriesList,
+            allCountries,
+            currentMaxYear: currentMaxYear,
+          ),
+
           _buildLineChart(
             'AMM Liquidity Pool (Local Currency)',
             visibleCountriesList,
@@ -512,6 +741,21 @@ class _ChartScreenState extends State<ChartScreen> {
             'Total Domestic Money (Local Currency)',
             visibleCountriesList,
             (m, c) => m.totalDomesticMoney,
+            currentMaxYear: currentMaxYear,
+          ),
+
+          _buildLineChart(
+            'Wealth Gini Index (0.0 = Equal, 1.0 = Unequal)',
+            visibleCountriesList,
+            (m, c) => m.giniIndex,
+            currentMaxYear: currentMaxYear,
+          ),
+
+          // ★追加: HWIのグラフ
+          _buildLineChart(
+            'Average HWI (Holistic Welfare Index)',
+            visibleCountriesList,
+            (m, c) => m.avgHwi,
             currentMaxYear: currentMaxYear,
           ),
 

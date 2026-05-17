@@ -13,6 +13,10 @@ class Country extends HiveObject {
   // 食料の自国民優先フラグ（trueならオークション時に自国民の落札を最優先する）
   bool foodDomesticPriority;
 
+  // UBIの配分設定
+  double ubiPayoutRatio; // 0.0〜1.0（デフォルト1.0＝全額配布）
+  bool useProgressiveUbi; // true＝傾斜配分（福祉）、false＝均等配分（フラット）
+
   // 外貨準備高(多通貨対応)
   Map<String, double> reserves;
 
@@ -32,6 +36,8 @@ class Country extends HiveObject {
     required this.inheritanceTaxRate,
     Map<String, bool>? exportBans,
     this.foodDomesticPriority = false,
+    this.ubiPayoutRatio = 1.0,
+    this.useProgressiveUbi = false,
     Map<String, double>? reserves,
     required this.residents,
     required this.resources,
@@ -128,8 +134,14 @@ class YearlyMetrics extends HiveObject {
   double ammLiquidity;
   double totalDomesticMoney;
 
-  // ★追加: 純貿易収支
   double netTradeBalance;
+  double grossTradeVolume;
+
+  // ジニ係数 (0.0=完全平等, 1.0=完全不平等)
+  double giniIndex;
+
+  // ★追加: 総合幸福度指数 (Holistic Welfare Index) の平均値
+  double avgHwi;
 
   YearlyMetrics({
     required this.year,
@@ -144,7 +156,10 @@ class YearlyMetrics extends HiveObject {
     required this.oilPrice,
     required this.ammLiquidity,
     required this.totalDomesticMoney,
-    this.netTradeBalance = 0.0, // ★追加
+    this.netTradeBalance = 0.0,
+    this.grossTradeVolume = 0.0,
+    this.giniIndex = 0.0,
+    this.avgHwi = 0.0, // ★追加
   });
 }
 
@@ -162,22 +177,26 @@ class CountryAdapter extends TypeAdapter<Country> {
   final int typeId = 0;
 
   @override
-  Country read(BinaryReader reader) => Country(
-    id: reader.readString(),
-    name: reader.readString(),
-    currencyName: reader.readString(),
-    tariffs: Map<String, double>.from(reader.readMap()),
-    inheritanceTaxRate: reader.readDouble(),
-    reserves: Map<String, double>.from(reader.readMap()),
-    residents: reader.readHiveList().castHiveList<Resident>(),
-    resources: Map<String, ResourceInfo>.from(reader.readMap()),
-    currencyIndex: reader.readDouble(),
-    exportLedger: Map<String, double>.from(reader.readMap()),
-    importLedger: Map<String, double>.from(reader.readMap()),
-    history: List<YearlyMetrics>.from(reader.readList()),
-    exportBans: Map<String, bool>.from(reader.readMap()),
-    foodDomesticPriority: reader.readBool(),
-  );
+  Country read(BinaryReader reader) {
+    return Country(
+      id: reader.readString(),
+      name: reader.readString(),
+      currencyName: reader.readString(),
+      tariffs: Map<String, double>.from(reader.readMap()),
+      inheritanceTaxRate: reader.readDouble(),
+      reserves: Map<String, double>.from(reader.readMap()),
+      residents: reader.readHiveList().castHiveList<Resident>(),
+      resources: Map<String, ResourceInfo>.from(reader.readMap()),
+      currencyIndex: reader.readDouble(),
+      exportLedger: Map<String, double>.from(reader.readMap()),
+      importLedger: Map<String, double>.from(reader.readMap()),
+      history: List<YearlyMetrics>.from(reader.readList()),
+      exportBans: Map<String, bool>.from(reader.readMap()),
+      foodDomesticPriority: reader.readBool(),
+      ubiPayoutRatio: reader.readDouble(),
+      useProgressiveUbi: reader.readBool(),
+    );
+  }
 
   @override
   void write(BinaryWriter writer, Country obj) {
@@ -195,6 +214,8 @@ class CountryAdapter extends TypeAdapter<Country> {
     writer.writeList(obj.history);
     writer.writeMap(obj.exportBans);
     writer.writeBool(obj.foodDomesticPriority);
+    writer.writeDouble(obj.ubiPayoutRatio);
+    writer.writeBool(obj.useProgressiveUbi);
   }
 }
 
@@ -282,7 +303,10 @@ class YearlyMetricsAdapter extends TypeAdapter<YearlyMetrics> {
     oilPrice: reader.readDouble(),
     ammLiquidity: reader.readDouble(),
     totalDomesticMoney: reader.readDouble(),
-    netTradeBalance: reader.readDouble(), // ★追加
+    netTradeBalance: reader.readDouble(),
+    grossTradeVolume: reader.readDouble(),
+    giniIndex: reader.readDouble(),
+    avgHwi: reader.readDouble(), // ★追加
   );
   @override
   void write(BinaryWriter writer, YearlyMetrics obj) {
@@ -298,7 +322,10 @@ class YearlyMetricsAdapter extends TypeAdapter<YearlyMetrics> {
     writer.writeDouble(obj.oilPrice);
     writer.writeDouble(obj.ammLiquidity);
     writer.writeDouble(obj.totalDomesticMoney);
-    writer.writeDouble(obj.netTradeBalance); // ★追加
+    writer.writeDouble(obj.netTradeBalance);
+    writer.writeDouble(obj.grossTradeVolume);
+    writer.writeDouble(obj.giniIndex);
+    writer.writeDouble(obj.avgHwi); // ★追加
   }
 }
 

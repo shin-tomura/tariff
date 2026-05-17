@@ -17,7 +17,6 @@ class DebugExportScreen extends StatelessWidget {
     buffer.writeln('=========================================');
     buffer.writeln('Current Year: ${engine.currentYear}');
 
-    // ★旧式（計算式）の介入ステータスを削除し、AMMの稼働状況を明記
     buffer.writeln('Engine Architecture: Multi-Currency AMM (Global Exchange)');
 
     buffer.writeln(
@@ -26,9 +25,20 @@ class DebugExportScreen extends StatelessWidget {
     buffer.writeln(
       'Civ Level 3 (Metal) Threshold: ${settings.get('civMetalThreshold', defaultValue: 30.0)}',
     );
+
+    double globalTradeVolume = 0.0;
+    if (engine.countries.isNotEmpty) {
+      for (var c in engine.countries) {
+        if (c.history.isNotEmpty) {
+          globalTradeVolume += c.history.last.grossTradeVolume;
+        }
+      }
+    }
+    buffer.writeln(
+      'Global Gross Trade Volume (Real Volume Base): ${globalTradeVolume.toStringAsFixed(2)}',
+    );
     buffer.writeln('-----------------------------------------\n');
 
-    // ★追加: 地球共通両替所（AMM）の流動性プール状況をダンプ
     var exchange = engine.globalExchange;
     buffer.writeln('>>> GLOBAL EXCHANGE (AMM LIQUIDITY POOL)');
     if (exchange.liquidityPool.isEmpty) {
@@ -41,21 +51,55 @@ class DebugExportScreen extends StatelessWidget {
     buffer.writeln('-----------------------------------------\n');
 
     for (var c in engine.countries) {
+      double latestGini = c.history.isNotEmpty ? c.history.last.giniIndex : 0.0;
+      double latestAvgHwi = c.history.isNotEmpty
+          ? c.history.last.avgHwi
+          : 0.0; // ★追加
+      double latestGrossTrade = c.history.isNotEmpty
+          ? c.history.last.grossTradeVolume
+          : 0.0;
+      double latestNetTrade = c.history.isNotEmpty
+          ? c.history.last.netTradeBalance
+          : 0.0;
+
       buffer.writeln('>>> COUNTRY: ${c.name} (ID: ${c.id})');
-      buffer.writeln('  [Base Stats]');
+      buffer.writeln('  [Base Stats & Macro Indicators]');
       buffer.writeln('  Currency Name: ${c.currencyName}');
       buffer.writeln(
         '  Currency Index: ${c.currencyIndex} (Real-time AMM ratio vs USD)',
       );
 
-      // ★変更: 多通貨の外貨準備高をダンプ
+      buffer.writeln('  Wealth Gini Index: ${latestGini.toStringAsFixed(4)}');
+      buffer.writeln(
+        '  Average HWI (Holistic Welfare): ${latestAvgHwi.toStringAsFixed(1)}',
+      ); // ★追加
+
+      buffer.writeln(
+        '  Gross Trade Volume (Local): ${latestGrossTrade.toStringAsFixed(2)}',
+      );
+      buffer.writeln(
+        '  Net Trade Balance (Local): ${latestNetTrade.toStringAsFixed(2)}',
+      );
+
+      // 外貨を含むすべての政府準備高を出力
       String reservesStr = c.reserves.entries
           .map((e) => '${e.key}=${e.value}')
           .join(', ');
-      buffer.writeln('  Government Reserves (Next UBI Pool): { $reservesStr }');
-      buffer.writeln('  Inheritance Tax Rate: ${c.inheritanceTaxRate}');
+      buffer.writeln(
+        '  Government Reserves (Local & Foreign): { $reservesStr }',
+      );
 
-      // ★追加: 輸出禁止措置と食料安全保障の設定状況をダンプ
+      buffer.writeln('\n  [Fiscal Policies & Welfare]');
+      buffer.writeln(
+        '    Inheritance Tax Rate: ${(c.inheritanceTaxRate * 100).toStringAsFixed(1)}%',
+      );
+      buffer.writeln(
+        '    UBI Payout Ratio: ${(c.ubiPayoutRatio * 100).toStringAsFixed(1)}%',
+      );
+      buffer.writeln(
+        '    UBI Distribution Model: ${c.useProgressiveUbi ? "Progressive (Welfare)" : "Flat (Universal)"}',
+      );
+
       buffer.writeln('\n  [Trade Policies & Security]');
       buffer.writeln(
         '    Food Domestic Priority: ${c.foodDomesticPriority ? "ENABLED" : "DISABLED"}',
@@ -108,7 +152,6 @@ class DebugExportScreen extends StatelessWidget {
           '      Weight: Current=${r.weight} | Previous=${r.previousWeight}',
         );
 
-        // ★変更: 住民の多通貨ウォレットをダンプ
         String walletStr = r.wallet.entries
             .map((e) => '${e.key}=${e.value}')
             .join(' | ');
@@ -129,6 +172,26 @@ class DebugExportScreen extends StatelessWidget {
       }
       buffer.writeln('\n=========================================\n');
     }
+
+    // 前年（Last Year）のイベントログの抽出と出力
+    buffer.writeln(
+      '>>> [Last Year Major Events (Year ${engine.currentYear - 1})]',
+    );
+    var logBox = Hive.box<EventLog>('logs');
+    int targetYear = engine.currentYear - 1;
+    var lastYearLogs = logBox.values
+        .where((log) => log.year == targetYear)
+        .toList();
+
+    if (lastYearLogs.isEmpty) {
+      buffer.writeln('  (No major events recorded last year)');
+    } else {
+      for (var log in lastYearLogs) {
+        buffer.writeln('  - ${log.message}');
+      }
+    }
+    buffer.writeln('\n=========================================');
+
     return buffer.toString();
   }
 

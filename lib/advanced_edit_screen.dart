@@ -27,16 +27,14 @@ class _AdvancedEditScreenState extends State<AdvancedEditScreen> {
   final _civMetalCtrl = TextEditingController();
 
   final List<String> _globalCurrencies = ['USD', 'CNY', 'JPY'];
-  final Map<String, TextEditingController> _walletCtrls = {};
 
-  // ★追加: 両替所の流動性プール編集用コントローラー
+  // 両替所の流動性プール編集用コントローラー
   final Map<String, TextEditingController> _poolCtrls = {};
 
   @override
   void initState() {
     super.initState();
     for (var cur in _globalCurrencies) {
-      _walletCtrls[cur] = TextEditingController();
       _poolCtrls[cur] = TextEditingController();
     }
   }
@@ -50,9 +48,6 @@ class _AdvancedEditScreenState extends State<AdvancedEditScreen> {
     _ageCtrl.dispose();
     _civWoodCtrl.dispose();
     _civMetalCtrl.dispose();
-    for (var ctrl in _walletCtrls.values) {
-      ctrl.dispose();
-    }
     for (var ctrl in _poolCtrls.values) {
       ctrl.dispose();
     }
@@ -78,9 +73,6 @@ class _AdvancedEditScreenState extends State<AdvancedEditScreen> {
   void _loadResidentBaseData(Resident r) {
     _selectedResident = r;
     _ageCtrl.text = r.age.toString();
-    for (var cur in _globalCurrencies) {
-      _walletCtrls[cur]?.text = (r.wallet[cur] ?? 0.0).toStringAsFixed(2);
-    }
     setState(() {});
   }
 
@@ -95,7 +87,6 @@ class _AdvancedEditScreenState extends State<AdvancedEditScreen> {
     setState(() {});
   }
 
-  // ★追加: 両替所データの読み込み
   void _loadGlobalExchangeData(SimulationEngine engine) {
     var exchange = engine.globalExchange;
     for (var cur in _globalCurrencies) {
@@ -166,13 +157,6 @@ class _AdvancedEditScreenState extends State<AdvancedEditScreen> {
       _checkInt('Age', r.age, nAge);
       r.age = nAge;
 
-      for (var cur in _globalCurrencies) {
-        double oldVal = r.wallet[cur] ?? 0.0;
-        double nVal = double.tryParse(_walletCtrls[cur]!.text) ?? oldVal;
-        _checkNum('Wallet ($cur)', oldVal, nVal);
-        r.wallet[cur] = nVal;
-      }
-
       r.save();
       if (changes.isNotEmpty) {
         engine.logUserAction('God Mode [${r.name}]: ${changes.join(", ")}');
@@ -197,12 +181,10 @@ class _AdvancedEditScreenState extends State<AdvancedEditScreen> {
         );
       }
     } else if (_editCategory == 'Global Exchange') {
-      // ★追加: 両替所の保存処理
       var exchange = engine.globalExchange;
       for (var cur in _globalCurrencies) {
         double oldVal = exchange.liquidityPool[cur] ?? 0.0;
         double nVal = double.tryParse(_poolCtrls[cur]!.text) ?? oldVal;
-        // プールが0以下になると数学的に破綻するので最低1.0を保証
         if (nVal <= 0) nVal = 1.0;
         _checkNum('AMM Pool ($cur)', oldVal, nVal);
         exchange.liquidityPool[cur] = nVal;
@@ -249,7 +231,7 @@ class _AdvancedEditScreenState extends State<AdvancedEditScreen> {
                             'Resources',
                             'Country Base',
                             'Resident Base',
-                            'Global Exchange', // ★追加
+                            'Global Exchange',
                             'Global Settings',
                           ]
                           .map(
@@ -381,17 +363,6 @@ class _AdvancedEditScreenState extends State<AdvancedEditScreen> {
                 ),
               if (_selectedResident != null) ...[
                 _buildNumField('Age (0 to 9)', _ageCtrl, isInt: true),
-                const SizedBox(height: 16),
-                const Text(
-                  'Wallet Balances:',
-                  style: TextStyle(
-                    fontWeight: FontWeight.bold,
-                    color: Colors.amber,
-                    fontSize: 16,
-                  ),
-                ),
-                for (var cur in _globalCurrencies)
-                  _buildNumField('$cur Amount', _walletCtrls[cur]!),
               ],
             ],
 

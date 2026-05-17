@@ -14,6 +14,7 @@ import 'history_screen.dart';
 import 'debug_export_screen.dart';
 import 'chart_screen.dart';
 import 'save_management_screen.dart';
+import 'rules_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -154,13 +155,25 @@ Future<void> _initializeDataIfEmpty() async {
         };
       }
 
+      // 各国政府の初期資金を設定
+      Map<String, double> initialReserves = {};
+      for (var cur in currencies) {
+        if (cur == currencies[i]) {
+          initialReserves[cur] = 0.0;
+        } else {
+          initialReserves[cur] = 1000.0;
+        }
+      }
+
       var c = Country(
         id: ids[i],
         name: cNames[i],
         currencyName: currencies[i],
         tariffs: {},
         inheritanceTaxRate: 0.1,
-        reserves: {currencies[i]: 0.0},
+        ubiPayoutRatio: 1.0,
+        useProgressiveUbi: false,
+        reserves: initialReserves,
         residents: hRes,
         resources: countryResources,
         exportLedger: {},
@@ -270,7 +283,6 @@ class DashboardScreen extends StatelessWidget {
 
       // エンジンの状態をリセットしてUIを再描画
       engine.currentYear = 1;
-      // logUserAction は内部で notifyListeners() を呼ぶため、画面が即座に Year 1 に更新されます
       engine.logUserAction('Simulation Factory Reset (Returned to Year 1).');
 
       ScaffoldMessenger.of(context).showSnackBar(
@@ -279,6 +291,37 @@ class DashboardScreen extends StatelessWidget {
         ),
       );
     }
+  }
+
+  // はみ出し防止用・アイコン付き政策タグ（RichTextで折り返し対応）
+  Widget _buildPolicyTag(
+    IconData icon,
+    String label,
+    String value,
+    Color valueColor,
+  ) {
+    return Text.rich(
+      TextSpan(
+        children: [
+          WidgetSpan(
+            alignment: PlaceholderAlignment.middle,
+            child: Padding(
+              padding: const EdgeInsets.only(right: 4.0),
+              child: Icon(icon, size: 14, color: Colors.white54),
+            ),
+          ),
+          TextSpan(
+            text: '$label ',
+            style: const TextStyle(color: Colors.white54),
+          ),
+          TextSpan(
+            text: value,
+            style: TextStyle(fontWeight: FontWeight.bold, color: valueColor),
+          ),
+        ],
+      ),
+      style: const TextStyle(fontSize: 13),
+    );
   }
 
   @override
@@ -421,6 +464,24 @@ class DashboardScreen extends StatelessWidget {
                 );
               },
             ),
+
+            ListTile(
+              leading: const Icon(Icons.menu_book, color: Colors.amber),
+              title: const Text(
+                'Laws of the Sandbox',
+                style: TextStyle(
+                  color: Colors.amber,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              onTap: () {
+                Navigator.pop(context);
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const RulesScreen()),
+                );
+              },
+            ),
           ],
         ),
       ),
@@ -429,36 +490,6 @@ class DashboardScreen extends StatelessWidget {
           : ListView(
               padding: const EdgeInsets.only(bottom: 100),
               children: [
-                // 上部バナー（AMM稼働中）
-                Container(
-                  width: double.infinity,
-                  color: Colors.indigo[900],
-                  padding: const EdgeInsets.symmetric(
-                    vertical: 8,
-                    horizontal: 16,
-                  ),
-                  child: Row(
-                    children: const [
-                      Icon(
-                        Icons.currency_exchange,
-                        color: Colors.white,
-                        size: 20,
-                      ),
-                      SizedBox(width: 8),
-                      Expanded(
-                        child: Text(
-                          'AMM Global Exchange (Multi-Currency) : ACTIVE',
-                          style: TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 14,
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-
                 // 地球共通両替所の流動性プールUI（スクロール領域内）
                 Card(
                   margin: const EdgeInsets.all(8),
@@ -529,12 +560,21 @@ class DashboardScreen extends StatelessWidget {
                   realWealth +=
                       (c.resources['Oil']?.annualProduction ?? 0.0) * 10.0;
 
-                  // 外貨準備高の文字列生成
-                  String reservesStr = c.reserves.entries
-                      .where((e) => e.value > 0.01)
-                      .map((e) => '${e.key}: ${e.value.toStringAsFixed(1)}')
-                      .join(', ');
-                  if (reservesStr.isEmpty) reservesStr = "0.0";
+                  // エンジン側で計算済みの最新指標を取得
+                  double gini = c.history.isNotEmpty
+                      ? c.history.last.giniIndex
+                      : 0.0;
+                  double avgHwi = c.history.isNotEmpty
+                      ? c.history.last.avgHwi
+                      : 0.0;
+
+                  // ジニ係数の色分けロジック
+                  Color giniColor = Colors.lightGreenAccent; // 平等
+                  if (gini > 0.5) {
+                    giniColor = Colors.redAccent; // 深刻な格差
+                  } else if (gini > 0.3) {
+                    giniColor = Colors.orangeAccent; // 警戒水域
+                  }
 
                   // 輸出禁止されている品目の文字列生成
                   String bannedItems = c.exportBans.entries
@@ -580,17 +620,106 @@ class DashboardScreen extends StatelessWidget {
                           ),
                           const Divider(),
 
-                          SelectableText(
-                            'Govt Reserves: [ $reservesStr ]',
-                            style: const TextStyle(
-                              color: Colors.amber,
-                              fontWeight: FontWeight.bold,
-                              fontSize: 14,
+                          // 政府の全保有通貨（外貨準備高含む）
+                          Container(
+                            width: double.infinity,
+                            padding: const EdgeInsets.all(8),
+                            margin: const EdgeInsets.only(bottom: 8),
+                            decoration: BoxDecoration(
+                              color: Colors.black26,
+                              borderRadius: BorderRadius.circular(6),
+                              border: Border.all(
+                                color: Colors.amber.withOpacity(0.4),
+                              ),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'Government Reserves (Foreign & Local):',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.amber,
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
+                                Wrap(
+                                  spacing: 12.0,
+                                  runSpacing: 8.0,
+                                  children: c.reserves.entries.map((e) {
+                                    bool isLocal = e.key == c.currencyName;
+                                    return _buildPolicyTag(
+                                      isLocal
+                                          ? Icons.account_balance_wallet
+                                          : Icons.currency_exchange,
+                                      '${e.key}:',
+                                      e.value.toStringAsFixed(1),
+                                      isLocal
+                                          ? Colors.yellowAccent
+                                          : Colors.lightBlueAccent,
+                                    );
+                                  }).toList(),
+                                ),
+                              ],
+                            ),
+                          ),
+
+                          // 財政・福祉政策（Fiscal Policies & Welfare）の表示パネル
+                          Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: Colors.black26,
+                              borderRadius: BorderRadius.circular(6),
+                              border: Border.all(
+                                color: Colors.purple.withOpacity(0.5),
+                              ),
+                            ),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Text(
+                                  'Fiscal Policies & Welfare:',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.white70,
+                                  ),
+                                ),
+                                const SizedBox(height: 6),
+                                Wrap(
+                                  spacing: 12.0,
+                                  runSpacing: 8.0,
+                                  children: [
+                                    _buildPolicyTag(
+                                      Icons.account_balance,
+                                      'Inheritance Tax:',
+                                      '${(c.inheritanceTaxRate * 100).toInt()}%',
+                                      Colors.orangeAccent,
+                                    ),
+                                    _buildPolicyTag(
+                                      Icons.percent,
+                                      'UBI Payout Ratio:',
+                                      '${(c.ubiPayoutRatio * 100).toInt()}%',
+                                      Colors.purpleAccent,
+                                    ),
+                                    _buildPolicyTag(
+                                      Icons.balance,
+                                      'UBI Model:',
+                                      c.useProgressiveUbi
+                                          ? 'Progressive (Welfare)'
+                                          : 'Flat (Universal)',
+                                      c.useProgressiveUbi
+                                          ? Colors.lightGreenAccent
+                                          : Colors.lightBlueAccent,
+                                    ),
+                                  ],
+                                ),
+                              ],
                             ),
                           ),
                           const SizedBox(height: 8),
 
-                          // ★追加: 貿易政策と安全保障の表示パネル
                           Container(
                             padding: const EdgeInsets.all(8),
                             decoration: BoxDecoration(
@@ -702,6 +831,17 @@ class DashboardScreen extends StatelessWidget {
                                   realWealth.toStringAsFixed(1),
                                   Colors.blueAccent,
                                 ),
+                                _buildMiniStat(
+                                  'Gini Index (Wealth)',
+                                  gini.toStringAsFixed(3),
+                                  giniColor,
+                                ),
+                                // ★追加: HWIの平均値を表示
+                                _buildMiniStat(
+                                  'Avg HWI (Welfare)',
+                                  avgHwi.toStringAsFixed(1),
+                                  Colors.cyanAccent,
+                                ),
                               ],
                             ),
                           ),
@@ -738,10 +878,13 @@ class DashboardScreen extends StatelessWidget {
               ],
             ),
       floatingActionButton: FloatingActionButton.extended(
-        backgroundColor: Colors.deepOrange,
+        backgroundColor: const Color.fromARGB(190, 1, 249, 38),
         onPressed: engine.isSimulating ? null : () => engine.advanceOneYear(),
-        icon: const Icon(Icons.fast_forward),
-        label: const Text('Advance 1 Year'),
+        icon: const Icon(Icons.fast_forward, color: Colors.black),
+        label: const Text(
+          'Advance 1 Year',
+          style: TextStyle(color: Colors.black),
+        ),
       ),
     );
   }

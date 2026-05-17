@@ -68,9 +68,13 @@ class _EditScreenState extends State<EditScreen> {
     _woodCtrl.text = r.woodStock.toStringAsFixed(2);
     _metalCtrl.text = r.metalStock.toStringAsFixed(2);
     _oilCtrl.text = r.oilStock.toStringAsFixed(2);
-    for (var cur in _globalCurrencies) {
-      _walletCtrls[cur]?.text = (r.wallet[cur] ?? 0.0).toStringAsFixed(2);
-    }
+
+    // ★変更: 住民は自国通貨しか持てないため、自国通貨のみロードする
+    String localCur = _selectedCountry!.currencyName;
+    _walletCtrls[localCur]?.text = (r.wallet[localCur] ?? 0.0).toStringAsFixed(
+      2,
+    );
+
     setState(() {});
   }
 
@@ -128,12 +132,12 @@ class _EditScreenState extends State<EditScreen> {
       r.metalStock = nMetal;
       r.oilStock = nOil;
 
-      for (var cur in _globalCurrencies) {
-        double oldVal = r.wallet[cur] ?? 0.0;
-        double nVal = double.tryParse(_walletCtrls[cur]!.text) ?? oldVal;
-        checkNum('Wallet ($cur)', oldVal, nVal);
-        r.wallet[cur] = nVal;
-      }
+      // ★変更: 住民は自国通貨のみセーブする
+      String localCur = _selectedCountry!.currencyName;
+      double oldVal = r.wallet[localCur] ?? 0.0;
+      double nVal = double.tryParse(_walletCtrls[localCur]!.text) ?? oldVal;
+      checkNum('Wallet ($localCur)', oldVal, nVal);
+      r.wallet[localCur] = nVal;
 
       r.save();
       if (changes.isNotEmpty) {
@@ -200,6 +204,165 @@ class _EditScreenState extends State<EditScreen> {
                     ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(
                         content: Text('Food Security Policy updated!'),
+                      ),
+                    );
+                  },
+                  child: const Text('Confirm & Apply'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  void _showUbiPayoutRatioDialog(
+    BuildContext context,
+    SimulationEngine engine,
+    Country c,
+  ) {
+    final TextEditingController ratioCtrl = TextEditingController(
+      text: (c.ubiPayoutRatio * 100).toStringAsFixed(1),
+    );
+
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: Text('UBI Payout Ratio in ${c.name}'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Set the percentage of Government Reserves to distribute as UBI each year. The remainder stays in the government pool.\nValid range: 0.0 to 100.0',
+                style: TextStyle(color: Colors.white70, fontSize: 13),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: ratioCtrl,
+                keyboardType: const TextInputType.numberWithOptions(
+                  decimal: true,
+                ),
+                decoration: const InputDecoration(
+                  labelText: 'Payout Ratio (%)',
+                  border: OutlineInputBorder(),
+                  suffixText: '%',
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.deepOrange,
+              ),
+              onPressed: () {
+                double parsed = double.tryParse(ratioCtrl.text) ?? -1.0;
+                if (parsed >= 0.0 && parsed <= 100.0) {
+                  double newRatio = parsed / 100.0;
+                  if (c.ubiPayoutRatio != newRatio) {
+                    engine.updateUbiPayoutRatio(c, newRatio);
+                  }
+                  Navigator.pop(ctx);
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('UBI Payout Ratio updated!')),
+                  );
+                } else {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text(
+                        'Invalid input. Please enter a value between 0 and 100.',
+                      ),
+                      backgroundColor: Colors.redAccent,
+                    ),
+                  );
+                }
+              },
+              child: const Text('Confirm & Apply'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  void _showUbiDistributionDialog(
+    BuildContext context,
+    SimulationEngine engine,
+    Country c,
+  ) {
+    bool isProgressive = c.useProgressiveUbi;
+
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: Text('UBI Distribution Model in ${c.name}'),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text(
+                    'Select how UBI is distributed among residents.',
+                    style: TextStyle(fontSize: 14),
+                  ),
+                  const SizedBox(height: 16),
+                  RadioListTile<bool>(
+                    title: const Text('Flat (Universal)'),
+                    subtitle: const Text(
+                      'Everyone gets the exact same amount.',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                    value: false,
+                    groupValue: isProgressive,
+                    activeColor: Colors.deepOrange,
+                    onChanged: (val) {
+                      setDialogState(() {
+                        isProgressive = val!;
+                      });
+                    },
+                  ),
+                  RadioListTile<bool>(
+                    title: const Text('Progressive (Welfare)'),
+                    subtitle: const Text(
+                      'More money given to the poorest (based on HWI).',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                    value: true,
+                    groupValue: isProgressive,
+                    activeColor: Colors.deepOrange,
+                    onChanged: (val) {
+                      setDialogState(() {
+                        isProgressive = val!;
+                      });
+                    },
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.deepOrange,
+                  ),
+                  onPressed: () {
+                    if (c.useProgressiveUbi != isProgressive) {
+                      engine.updateProgressiveUbi(c, isProgressive);
+                    }
+                    Navigator.pop(ctx);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('UBI Distribution Model updated!'),
                       ),
                     );
                   },
@@ -289,7 +452,6 @@ class _EditScreenState extends State<EditScreen> {
     List<String> resTypes = ['Food', 'Wood', 'Metal', 'Oil'];
     Map<String, TextEditingController> ctrls = {};
 
-    // 各項目の初期値をセットしたコントローラーを生成
     for (var to in engine.countries.where((c) => c.id != from.id)) {
       for (var resType in resTypes) {
         String key = '${to.id}:$resType';
@@ -379,7 +541,6 @@ class _EditScreenState extends State<EditScreen> {
                 bool hasError = false;
                 Map<String, double> newRates = {};
 
-                // 全入力値のバリデーション
                 ctrls.forEach((key, ctrl) {
                   double parsed = double.tryParse(ctrl.text) ?? -1.0;
                   if (parsed >= 0.0 && parsed <= 1000.0) {
@@ -398,10 +559,9 @@ class _EditScreenState extends State<EditScreen> {
                       backgroundColor: Colors.redAccent,
                     ),
                   );
-                  return; // エラーがあれば処理を中断
+                  return;
                 }
 
-                // エンジンへ適用
                 newRates.forEach((key, rate) {
                   if ((from.tariffs[key] ?? 0.0) != rate) {
                     var parts = key.split(':');
@@ -478,7 +638,6 @@ class _EditScreenState extends State<EditScreen> {
               onPressed: () {
                 double parsed = double.tryParse(taxCtrl.text) ?? -1.0;
 
-                // バリデーションチェック (0.0% 〜 100.0%)
                 if (parsed >= 0.0 && parsed <= 100.0) {
                   double newRate = parsed / 100.0;
                   if (c.inheritanceTaxRate != newRate) {
@@ -504,6 +663,192 @@ class _EditScreenState extends State<EditScreen> {
               child: const Text('Confirm & Apply'),
             ),
           ],
+        );
+      },
+    );
+  }
+
+  // ★追加: 為替介入（Currency Intervention）のダイアログ
+  void _showInterventionDialog(
+    BuildContext context,
+    SimulationEngine engine,
+    Country c,
+  ) {
+    String sourceCurrency = c.currencyName; // デフォルトは自国通貨売り
+    String targetCurrency = _globalCurrencies.firstWhere(
+      (cur) => cur != c.currencyName,
+    );
+    final TextEditingController amountCtrl = TextEditingController(
+      text: '1000',
+    );
+
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            double currentReserves = c.reserves[sourceCurrency] ?? 0.0;
+
+            return AlertDialog(
+              title: Text('Currency Intervention by ${c.name}'),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      'Directly swap government reserves on the Global AMM to manipulate exchange rates.',
+                      style: TextStyle(fontSize: 13),
+                    ),
+                    const SizedBox(height: 16),
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: Colors.black26,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Column(
+                        children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              const Text('Sell (Source):'),
+                              DropdownButton<String>(
+                                value: sourceCurrency,
+                                items: _globalCurrencies.map((cur) {
+                                  return DropdownMenuItem(
+                                    value: cur,
+                                    child: Text(cur),
+                                  );
+                                }).toList(),
+                                onChanged: (val) {
+                                  if (val != null) {
+                                    setDialogState(() {
+                                      sourceCurrency = val;
+                                      if (sourceCurrency == targetCurrency) {
+                                        targetCurrency = _globalCurrencies
+                                            .firstWhere(
+                                              (c) => c != sourceCurrency,
+                                            );
+                                      }
+                                    });
+                                  }
+                                },
+                              ),
+                            ],
+                          ),
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              const Text('Buy (Target):'),
+                              DropdownButton<String>(
+                                value: targetCurrency,
+                                items: _globalCurrencies.map((cur) {
+                                  return DropdownMenuItem(
+                                    value: cur,
+                                    // 送金元と同じ通貨は選べないようにする
+                                    enabled: cur != sourceCurrency,
+                                    child: Text(
+                                      cur,
+                                      style: TextStyle(
+                                        color: cur == sourceCurrency
+                                            ? Colors.grey
+                                            : null,
+                                      ),
+                                    ),
+                                  );
+                                }).toList(),
+                                onChanged: (val) {
+                                  if (val != null && val != sourceCurrency) {
+                                    setDialogState(() {
+                                      targetCurrency = val;
+                                    });
+                                  }
+                                },
+                              ),
+                            ],
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      'Available $sourceCurrency Reserves: ${currentReserves.toStringAsFixed(1)}',
+                      style: const TextStyle(
+                        color: Colors.amber,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    TextField(
+                      controller: amountCtrl,
+                      keyboardType: const TextInputType.numberWithOptions(
+                        decimal: true,
+                      ),
+                      decoration: InputDecoration(
+                        labelText: 'Amount to Sell',
+                        border: const OutlineInputBorder(),
+                        suffixText: sourceCurrency,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      sourceCurrency == c.currencyName
+                          ? '⚠️ This will devalue your currency (Boost Exports).'
+                          : '⚠️ This will strengthen your currency (Protect Value).',
+                      style: TextStyle(
+                        color: sourceCurrency == c.currencyName
+                            ? Colors.orangeAccent
+                            : Colors.cyanAccent,
+                        fontSize: 12,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blueAccent,
+                  ),
+                  onPressed: () {
+                    double amount = double.tryParse(amountCtrl.text) ?? 0.0;
+                    if (amount > 0 && amount <= currentReserves) {
+                      engine.executeCurrencyIntervention(
+                        c,
+                        sourceCurrency,
+                        targetCurrency,
+                        amount,
+                      );
+                      Navigator.pop(ctx);
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(
+                            'Intervention executed: Sold $amount $sourceCurrency for $targetCurrency!',
+                          ),
+                        ),
+                      );
+                    } else {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text(
+                            'Invalid amount or insufficient reserves.',
+                          ),
+                          backgroundColor: Colors.redAccent,
+                        ),
+                      );
+                    }
+                  },
+                  child: const Text('Execute Intervention'),
+                ),
+              ],
+            );
+          },
         );
       },
     );
@@ -703,6 +1048,43 @@ class _EditScreenState extends State<EditScreen> {
                       ),
                     ),
                     ElevatedButton.icon(
+                      icon: const Icon(Icons.percent),
+                      label: const Text('Set UBI Payout Ratio'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.purple[700],
+                      ),
+                      onPressed: () => _showUbiPayoutRatioDialog(
+                        context,
+                        engine,
+                        _selectedCountry!,
+                      ),
+                    ),
+                    ElevatedButton.icon(
+                      icon: const Icon(Icons.balance),
+                      label: const Text('UBI Distribution Model'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.indigo[600],
+                      ),
+                      onPressed: () => _showUbiDistributionDialog(
+                        context,
+                        engine,
+                        _selectedCountry!,
+                      ),
+                    ),
+                    // ★追加: 為替介入ボタン
+                    ElevatedButton.icon(
+                      icon: const Icon(Icons.currency_exchange),
+                      label: const Text('Currency Intervention'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blueAccent[700],
+                      ),
+                      onPressed: () => _showInterventionDialog(
+                        context,
+                        engine,
+                        _selectedCountry!,
+                      ),
+                    ),
+                    ElevatedButton.icon(
                       icon: const Icon(Icons.attach_money),
                       label: const Text('Helicopter Money'),
                       style: ElevatedButton.styleFrom(
@@ -751,14 +1133,17 @@ class _EditScreenState extends State<EditScreen> {
 
                 const SizedBox(height: 16),
                 const Text(
-                  'Resident Wallet:',
+                  'Resident Wallet (Local Currency Only):',
                   style: TextStyle(
                     fontWeight: FontWeight.bold,
                     color: Colors.cyanAccent,
                   ),
                 ),
-                for (var cur in _globalCurrencies)
-                  _buildNumField('Wallet: $cur', _walletCtrls[cur]!),
+                // ★変更: 自国通貨のウォレット欄のみを描画
+                _buildNumField(
+                  'Wallet: ${_selectedCountry!.currencyName}',
+                  _walletCtrls[_selectedCountry!.currencyName]!,
+                ),
 
                 const SizedBox(height: 16),
                 const Text(

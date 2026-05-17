@@ -62,7 +62,6 @@ class SimulationEngine extends ChangeNotifier {
       ),
     );
 
-    // ★追加: ログが500件を超えたら一番古いものを削除してメモリを節約
     if (logBox.length > 500) {
       final oldestKey = logBox.keys.first;
       logBox.delete(oldestKey);
@@ -94,6 +93,11 @@ class SimulationEngine extends ChangeNotifier {
     final allCountries = countries;
     GlobalExchange exchange = globalExchange;
 
+    // 実質貿易量（ポイント）を記録するマップの初期化
+    Map<String, double> realGrossTradeVolumes = {
+      for (var c in allCountries) c.id: 0.0,
+    };
+
     // --- 1. 資源の算出と住民の加齢・UBI分配 ---
     for (var c in allCountries) {
       c.exportLedger.clear();
@@ -118,6 +122,7 @@ class SimulationEngine extends ChangeNotifier {
         resident.age += 1;
         // 餓死判定を削除し、純粋な寿命(10歳)のみで転生
         if (resident.age >= 10) {
+          // 没収分は金庫へ行き、自国通貨はUBI原資となる
           double totalTaxPaid = 0.0;
           for (var cur in resident.wallet.keys.toList()) {
             double amt = resident.wallet[cur]! * c.inheritanceTaxRate;
@@ -126,45 +131,125 @@ class SimulationEngine extends ChangeNotifier {
             totalTaxPaid += amt;
           }
 
+          // --- 2. 実物資産の相続税処理 ---
+          double safeTaxRate = max(0.0, min(1.0, c.inheritanceTaxRate));
+          double inheritRatio = 1.0 - safeTaxRate; // 子孫が引き継げる割合
+          double taxRatio = safeTaxRate; // 政府が没収する割合
+
+          // 没収された資源は、国内の市場在庫（公売）に還元される
+          if (c.resources.containsKey('Wood')) {
+            c.resources['Wood']!.availableAmount +=
+                resident.woodStock * taxRatio;
+          }
+          if (c.resources.containsKey('Metal')) {
+            c.resources['Metal']!.availableAmount +=
+                resident.metalStock * taxRatio;
+          }
+          if (c.resources.containsKey('Oil')) {
+            c.resources['Oil']!.availableAmount += resident.oilStock * taxRatio;
+          }
+
+          // 残りは0歳の自分にそのまま引き継ぐ（フェイルセーフでマイナス防止）
+          resident.woodStock = max(0.0, resident.woodStock * inheritRatio);
+          resident.metalStock = max(0.0, resident.metalStock * inheritRatio);
+          resident.oilStock = max(0.0, resident.oilStock * inheritRatio);
+
           resident.lastYearActivities.add(
-            "Reincarnated (Lost wealth due to death). Paid approx ${totalTaxPaid.toStringAsFixed(1)} tax in various currencies.",
+            "Reincarnated. Inherited ${(inheritRatio * 100).toInt()}% of physical assets. Paid approx ${totalTaxPaid.toStringAsFixed(1)} tax in currencies.",
           );
+
           resident.age = 0;
           resident.weight = 60.0;
           resident.previousWeight = 60.0;
-          resident.woodStock = 0.0;
-          resident.metalStock = 0.0;
-          resident.oilStock = 0.0;
         }
       }
 
-      // UBI（分配金）の計算：政府の外貨準備高をすべて国民に分配する
-      Map<String, double> ubiPerResident = {};
-      if (c.residents.isNotEmpty) {
-        for (var cur in c.reserves.keys) {
-          double amount = c.reserves[cur] ?? 0.0;
-          if (amount > 0) {
-            ubiPerResident[cur] = amount / c.residents.length;
-            c.reserves[cur] = 0.0; // 配布してリセット
+      // =================================================================
+      // UBI（分配金）の計算と傾斜配分のための事前HWI算出
+      // =================================================================
+
+      // 1. 分配前の平均金融資産を算出
+      List<double> preUbiFinancialWealths = [];
+      for (var r in c.residents) {
+        double w = 0.0;
+        r.wallet.forEach((cur, amt) {
+          double pLocal = exchange.liquidityPool[c.currencyName] ?? 1.0;
+          double pForeign = exchange.liquidityPool[cur] ?? 1.0;
+          if (pForeign <= 0.0) pForeign = 1.0;
+          w += amt * (pLocal / pForeign);
+        });
+        preUbiFinancialWealths.add(max(0.0, w));
+      }
+      double preUbiAvgFinWealth =
+          preUbiFinancialWealths.fold(0.0, (a, b) => a + b) /
+          max(1, c.residents.length);
+
+      // 2. 分配前のHWI算出し、傾斜配分用の逆数合計を求める
+      List<double> preUbiHwi = [];
+      double totalInverseHwi = 0.0;
+      for (int i = 0; i < c.residents.length; i++) {
+        Resident r = c.residents[i];
+        double stockScore =
+            (r.woodStock * 20.0) + (r.metalStock * 50.0) + (r.oilStock * 100.0);
+        double healthScore = max(0.0, (r.weight - 50.0) * 100.0);
+        double ratio = preUbiAvgFinWealth > 0.0
+            ? (preUbiFinancialWealths[i] / preUbiAvgFinWealth)
+            : 0.0;
+        double finScore = 1000.0 * (log(1.0 + max(0.0, ratio)) / ln2);
+
+        double hwi = max(0.0, stockScore + healthScore + finScore);
+        preUbiHwi.add(hwi);
+
+        if (c.useProgressiveUbi) {
+          totalInverseHwi += 1.0 / max(1.0, hwi);
+        }
+      }
+
+      // 3. 政府準備高から、Payout Ratio に応じて分配用プールを抽出
+      Map<String, double> ubiPool = {};
+      double safePayoutRatio = max(0.0, min(1.0, c.ubiPayoutRatio));
+
+      // ★修正: UBIで国民に配るのは「自国通貨」のみに限定（外貨準備はプールに温存）
+      String localCur = c.currencyName;
+      double amount = c.reserves[localCur] ?? 0.0;
+      double payoutAmount = amount * safePayoutRatio;
+      if (payoutAmount > 0) {
+        ubiPool[localCur] = payoutAmount;
+        c.reserves[localCur] = amount - payoutAmount; // 残りを政府にプール
+      }
+
+      // 4. 各住民への実際の配布
+      for (int i = 0; i < c.residents.length; i++) {
+        await _yieldCpu();
+        Resident resident = c.residents[i];
+        List<String> receivedUbi = [];
+
+        // 配分シェアの決定
+        double shareRatio = 0.0;
+        if (c.residents.isNotEmpty) {
+          if (c.useProgressiveUbi && totalInverseHwi > 0.0) {
+            shareRatio = (1.0 / max(1.0, preUbiHwi[i])) / totalInverseHwi;
+          } else {
+            shareRatio = 1.0 / c.residents.length; // 均等配分（フラット）
           }
         }
-      }
 
-      for (var resident in c.residents) {
-        await _yieldCpu();
-        List<String> receivedUbi = [];
-        for (var cur in ubiPerResident.keys) {
-          double ubiAmt = ubiPerResident[cur]!;
-          resident.wallet[cur] = (resident.wallet[cur] ?? 0.0) + ubiAmt;
-          receivedUbi.add("${ubiAmt.toStringAsFixed(1)} $cur");
+        for (var cur in ubiPool.keys) {
+          double ubiAmt = ubiPool[cur]! * shareRatio;
+          if (ubiAmt > 0) {
+            resident.wallet[cur] = (resident.wallet[cur] ?? 0.0) + ubiAmt;
+            receivedUbi.add("${ubiAmt.toStringAsFixed(1)} $cur");
+          }
         }
 
         if (receivedUbi.isNotEmpty) {
+          String distType = c.useProgressiveUbi ? "Progressive" : "Flat";
           resident.lastYearActivities.add(
-            "Received UBI: ${receivedUbi.join(', ')}",
+            "Received UBI ($distType): ${receivedUbi.join(', ')}",
           );
         }
 
+        // --- 資源の減価 ---
         resident.woodStock = max(0, resident.woodStock * 0.90);
         resident.metalStock = max(0, resident.metalStock * 0.95);
         resident.oilStock = 0.0;
@@ -199,12 +284,11 @@ class SimulationEngine extends ChangeNotifier {
             desiredRes = 'Oil';
 
           if (rType == 'Food' || rType == desiredRes) {
-            // 生存本能ロジック（体重50kg未満の飢餓状態なら、Food以外の入札を放棄してWTPを実質ゼロにする）
             if (rType != 'Food' && resident.weight < 50.0) {
               resident.lastYearActivities.add(
                 "Skipped bidding for $rType due to starvation (Weight: ${resident.weight.toStringAsFixed(1)}kg).",
               );
-              continue; // 予算ゼロ扱いとして入札処理自体をスキップ
+              continue;
             }
 
             Country? bestSeller;
@@ -215,7 +299,6 @@ class SimulationEngine extends ChangeNotifier {
               if (sellerC.resources[rType]!.availableAmount < requiredAmount)
                 continue;
 
-              // 売り手国が自国以外かつ、対象品目の輸出を禁止している場合はスキップ
               if (buyerC.id != sellerC.id &&
                   (sellerC.exportBans[rType] ?? false)) {
                 continue;
@@ -225,7 +308,6 @@ class SimulationEngine extends ChangeNotifier {
               double tariff = buyerC.tariffs['${sellerC.id}:$rType'] ?? 0.0;
               double poolOut = exchange.liquidityPool[sellerCur] ?? 1.0;
 
-              // AMMレートによる予想価格
               double estCost =
                   sellerC.resources[rType]!.lastMarketPrice *
                   (poolIn / poolOut) *
@@ -242,7 +324,6 @@ class SimulationEngine extends ChangeNotifier {
               double poolOut = exchange.liquidityPool[sellerCur] ?? 1.0;
               double tariff = buyerC.tariffs['${bestSeller.id}:$rType'] ?? 0.0;
 
-              // 自国通貨の予算（Foodは全額、それ以外は30%）
               double localBudget = resident.wallet[buyerLocal] ?? 0.0;
               if (rType != 'Food') localBudget *= 0.3;
 
@@ -250,7 +331,6 @@ class SimulationEngine extends ChangeNotifier {
               if (buyerLocal == sellerCur) {
                 wtpS = localBudget / (1 + tariff);
               } else {
-                // 定数積(AMM)の公式から、予算内で取得できる外貨の最大額を逆算
                 wtpS =
                     (localBudget * poolOut) /
                     (poolIn * (1 + tariff) + localBudget);
@@ -267,7 +347,6 @@ class SimulationEngine extends ChangeNotifier {
               resident.lastYearActivities.add(
                 "Failed to bid for $rType (No stock available globally).",
               );
-              // 餓死で即転生はしないが、ペナルティとして体重は減少する
               if (rType == 'Food') resident.weight -= 5.0;
             }
           }
@@ -281,12 +360,10 @@ class SimulationEngine extends ChangeNotifier {
         var bids = marketBids[sellerC.id]!;
 
         bids.sort((a, b) {
-          // 食料かつ自国民優先フラグがONの場合
           if (rType == 'Food' && sellerC.foodDomesticPriority) {
             bool aIsDomestic = a['buyerC'].id == sellerC.id;
             bool bIsDomestic = b['buyerC'].id == sellerC.id;
 
-            // 自国民を無条件でWTPより優先して上位に持ってくる
             if (aIsDomestic && !bIsDomestic) return -1;
             if (!aIsDomestic && bIsDomestic) return 1;
           }
@@ -301,19 +378,25 @@ class SimulationEngine extends ChangeNotifier {
         double reqAmt = requiredResourceAmounts[rType] ?? 10.0;
         int maxWinners = (res.availableAmount / reqAmt).floor();
 
+        // ★修正: Claudeの指摘を反映し、クリアリング価格の計算バグを修正
         double clearingPriceS = res.lastMarketPrice;
         if (bids.isNotEmpty) {
-          clearingPriceS = max(
-            1.0,
-            bids[min(bids.length - 1, maxWinners - 1)]['wtpS'],
-          );
+          if (bids.length > maxWinners && maxWinners > 0) {
+            // 競争がある場合：落札ラインぎりぎりの限界価格を採用
+            clearingPriceS = max(1.0, bids[maxWinners - 1]['wtpS']);
+          } else {
+            // 供給過剰（全員落札可能）な場合：独占高値を防ぐため、最低WTPか前回価格の安い方を採用
+            clearingPriceS = max(
+              1.0,
+              min(res.lastMarketPrice, bids.last['wtpS']),
+            );
+          }
         } else {
-          // 誰も入札しなかった場合、食糧は大暴落、食糧以外の資源については価格下落率を50パーセントに変更
+          // 誰も買わなかった場合は暴落
           double fallRate = (rType == 'Food') ? 0.01 : 0.50;
           clearingPriceS = max(1.0, clearingPriceS * fallRate);
         }
 
-        // 1回目のオークションのクリアリング価格を保存
         res.lastMarketPrice = clearingPriceS;
 
         int winnersCount = 0;
@@ -351,7 +434,7 @@ class SimulationEngine extends ChangeNotifier {
                   P,
                   winnersCount,
                 );
-                securedResidents.add(buyer); // 確保記録
+                securedResidents.add(buyer);
                 winnersCount++;
               } else {
                 _executeTradeFailure(buyer, rType, sellerC);
@@ -361,18 +444,16 @@ class SimulationEngine extends ChangeNotifier {
               double poolOut = exchange.liquidityPool[sellerCur] ?? 1.0;
 
               if (shortage > 0) {
-                if (poolOut <= shortage) continue; // AMM枯渇回避
+                if (poolOut <= shortage) continue;
                 inputNeeded = (poolIn * shortage) / (poolOut - shortage);
               }
 
-              // 関税は「自国通貨に換算したフルコスト」から計算
               double tariffRate = buyerC.tariffs['${sellerC.id}:$rType'] ?? 0.0;
               double fullLocalEq = (poolIn * P) / (poolOut - P);
               tariffAmt = fullLocalEq * tariffRate;
 
               if ((buyer.wallet[buyerLocal] ?? 0.0) >=
                   inputNeeded + tariffAmt) {
-                // 買手の財布から引く
                 buyer.wallet[buyerLocal] =
                     buyer.wallet[buyerLocal]! - (inputNeeded + tariffAmt);
                 if (P - shortage > 0) {
@@ -380,7 +461,6 @@ class SimulationEngine extends ChangeNotifier {
                       buyer.wallet[sellerCur]! - (P - shortage);
                 }
 
-                // AMMプールの更新
                 if (shortage > 0) {
                   exchange.liquidityPool[buyerLocal] =
                       exchange.liquidityPool[buyerLocal]! + inputNeeded;
@@ -388,19 +468,32 @@ class SimulationEngine extends ChangeNotifier {
                       exchange.liquidityPool[sellerCur]! - shortage;
                 }
 
-                // 売手国と関税の徴収
                 sellerC.reserves[sellerCur] =
                     (sellerC.reserves[sellerCur] ?? 0.0) + P;
                 buyerC.reserves[buyerLocal] =
                     (buyerC.reserves[buyerLocal] ?? 0.0) + tariffAmt;
 
-                // レジャー（帳簿）の更新
                 String impKey = "${sellerC.id}:$rType";
                 buyerC.importLedger[impKey] =
                     (buyerC.importLedger[impKey] ?? 0.0) + P;
                 String expKey = "${buyerC.id}:$rType";
                 sellerC.exportLedger[expKey] =
                     (sellerC.exportLedger[expKey] ?? 0.0) + P;
+
+                double tradePoints = 0.0;
+                if (rType == 'Food')
+                  tradePoints = reqAmt * 10.0;
+                else if (rType == 'Wood')
+                  tradePoints = reqAmt * 20.0;
+                else if (rType == 'Metal')
+                  tradePoints = reqAmt * 50.0;
+                else if (rType == 'Oil')
+                  tradePoints = reqAmt * 100.0;
+
+                realGrossTradeVolumes[buyerC.id] =
+                    (realGrossTradeVolumes[buyerC.id] ?? 0.0) + tradePoints;
+                realGrossTradeVolumes[sellerC.id] =
+                    (realGrossTradeVolumes[sellerC.id] ?? 0.0) + tradePoints;
 
                 _executeTradeSuccess(
                   buyer,
@@ -413,7 +506,7 @@ class SimulationEngine extends ChangeNotifier {
                   P,
                   winnersCount,
                 );
-                securedResidents.add(buyer); // 確保記録
+                securedResidents.add(buyer);
                 winnersCount++;
               } else {
                 _executeTradeFailure(buyer, rType, sellerC);
@@ -427,18 +520,14 @@ class SimulationEngine extends ChangeNotifier {
           }
         }
 
-        // --- 食糧の2回目入札と余剰価格調整 ---
         if (rType == 'Food') {
-          // 2回目入札の参加者（自国民のみ）とWTPをリスト化して再オークションを実施
           List<Map<String, dynamic>> round2Bids = [];
           double tariffRate = sellerC.tariffs['${sellerC.id}:$rType'] ?? 0.0;
           double clearingPriceS2 = 0.0;
 
           for (var resident in sellerC.residents) {
-            // 十分な余剰がないか、既に確保できている人はスキップ
             if (securedResidents.contains(resident)) continue;
 
-            // 手持ちの予算から、2回目の入札でのWTPを算出
             double localBudget = resident.wallet[sellerCur] ?? 0.0;
             double wtpS = localBudget / (1 + tariffRate);
 
@@ -450,7 +539,6 @@ class SimulationEngine extends ChangeNotifier {
           }
 
           if (round2Bids.isNotEmpty && res.availableAmount >= reqAmt) {
-            // 2回目の入札額でソート
             round2Bids.sort((a, b) {
               int cmp = b['wtpS'].compareTo(a['wtpS']);
               if (cmp == 0) return a['rand'].compareTo(b['rand']);
@@ -459,13 +547,16 @@ class SimulationEngine extends ChangeNotifier {
 
             int maxWinners2 = (res.availableAmount / reqAmt).floor();
 
-            // 2回目のクリアリング価格（自国民の財布事情に合わせた適正価格）
-            clearingPriceS2 = max(
-              1.0,
-              round2Bids[min(round2Bids.length - 1, maxWinners2 - 1)]['wtpS'],
-            );
+            // ★修正: 第2ラウンドでも同様に独占高値バグを防ぐ
+            if (round2Bids.length > maxWinners2 && maxWinners2 > 0) {
+              clearingPriceS2 = max(1.0, round2Bids[maxWinners2 - 1]['wtpS']);
+            } else {
+              clearingPriceS2 = max(
+                1.0,
+                min(clearingPriceS, round2Bids.last['wtpS']),
+              );
+            }
 
-            // 1回目の暴騰価格（外国人の失敗入札など）よりは高くならないよう制限
             clearingPriceS2 = min(clearingPriceS, clearingPriceS2);
 
             for (var bid in round2Bids) {
@@ -495,31 +586,23 @@ class SimulationEngine extends ChangeNotifier {
                     winnersCount,
                   );
                   securedResidents.add(resident);
-
-                  // 過食バグの修正箇所: 1回目の失敗ペナルティ相殺時にも、70.0kgの上限を適用する
                   resident.weight = min(70.0, resident.weight + 5.0);
-
                   winnersCount++;
                 }
               }
             }
           }
 
-          // 2回目の入札が終わった後の余剰量率分価格を下落させる
-          double clearingPriceAll;
-          if (clearingPriceS2 > 0.0) {
-            clearingPriceAll = clearingPriceS2;
-          } else {
-            clearingPriceAll = clearingPriceS;
-          }
+          double clearingPriceAll = clearingPriceS2 > 0.0
+              ? clearingPriceS2
+              : clearingPriceS;
           double production = res.annualProduction;
           double surplus = res.availableAmount;
           double surplusRatio = (production > 0) ? (surplus / production) : 0.0;
-          surplusRatio = min(0.99, surplusRatio); // 全量余っても99パーセントの下落率で留める
+          surplusRatio = min(0.99, surplusRatio);
 
           double surplusBasedPrice = clearingPriceAll * (1.0 - surplusRatio);
 
-          // 既存のロジックで既に決定された価格がこの余剰率から算出される価格よりも低ければ既存のロジックを採用 (最低価格は1.0)
           res.lastMarketPrice = max(
             1.0,
             min(clearingPriceAll, surplusBasedPrice),
@@ -533,7 +616,6 @@ class SimulationEngine extends ChangeNotifier {
     double baseUsdLiquidity = exchange.liquidityPool['USD'] ?? 1.0;
 
     for (var c in allCountries) {
-      // 通貨インデックスは「AMM内のUSDとの比率」でリアルタイム算出
       double cLiquidity = exchange.liquidityPool[c.currencyName] ?? 1.0;
       c.currencyIndex = baseUsdLiquidity / cLiquidity;
 
@@ -551,7 +633,6 @@ class SimulationEngine extends ChangeNotifier {
         });
       }
 
-      // 国内の自国通貨総保有量（政府の外貨準備高 + 国民の財布）の計算
       double residentLocalMoney = c.residents.fold(
         0.0,
         (sum, r) => sum + (r.wallet[c.currencyName] ?? 0.0),
@@ -559,14 +640,68 @@ class SimulationEngine extends ChangeNotifier {
       double govtLocalMoney = c.reserves[c.currencyName] ?? 0.0;
       double totalDomesticMoney = govtLocalMoney + residentLocalMoney;
 
-      // 両替所の自国通貨プール量
       double currentAmmLiquidity =
           exchange.liquidityPool[c.currencyName] ?? 0.0;
 
-      // 純輸出（貿易収支）の計算
       double totalExp = c.exportLedger.values.fold(0.0, (a, b) => a + b);
       double totalImp = c.importLedger.values.fold(0.0, (a, b) => a + b);
       double netTradeBal = totalExp - totalImp;
+      double grossTradeVol = realGrossTradeVolumes[c.id] ?? 0.0;
+
+      List<double> financialWealths = [];
+      for (var r in c.residents) {
+        double totalWealthLocalEq = 0.0;
+        r.wallet.forEach((cur, amt) {
+          if (cur == c.currencyName) {
+            totalWealthLocalEq += amt;
+          } else {
+            double pLocal = exchange.liquidityPool[c.currencyName] ?? 1.0;
+            double pForeign = exchange.liquidityPool[cur] ?? 1.0;
+            if (pForeign <= 0.0) pForeign = 1.0;
+            totalWealthLocalEq += amt * (pLocal / pForeign);
+          }
+        });
+        financialWealths.add(max(0.0, totalWealthLocalEq));
+      }
+
+      double totalFinWealth = financialWealths.fold(0.0, (a, b) => a + b);
+      double avgFinWealth = totalFinWealth / max(1, financialWealths.length);
+
+      List<double> hwiScores = [];
+      for (int i = 0; i < c.residents.length; i++) {
+        Resident r = c.residents[i];
+
+        double stockScore =
+            (r.woodStock * 20.0) + (r.metalStock * 50.0) + (r.oilStock * 100.0);
+        double healthScore = max(0.0, (r.weight - 50.0) * 100.0);
+        double ratio = avgFinWealth > 0.0
+            ? (financialWealths[i] / avgFinWealth)
+            : 0.0;
+        double financialScore = 1000.0 * (log(1.0 + max(0.0, ratio)) / ln2);
+
+        double totalHwi = max(0.0, stockScore + healthScore + financialScore);
+        hwiScores.add(totalHwi);
+      }
+
+      hwiScores.sort();
+      double totalHwiSum = hwiScores.fold(0.0, (a, b) => a + b);
+
+      // ★追加: 今年のHWIの平均値を計算
+      double avgHwi = hwiScores.isNotEmpty
+          ? totalHwiSum / hwiScores.length
+          : 0.0;
+
+      double gini = 0.0;
+
+      if (totalHwiSum > 0 && hwiScores.isNotEmpty) {
+        int n = hwiScores.length;
+        double sumNumerator = 0.0;
+        for (int i = 0; i < n; i++) {
+          sumNumerator += (i + 1) * hwiScores[i];
+        }
+        gini = (2.0 * sumNumerator) / (n * totalHwiSum) - (n + 1.0) / n;
+        gini = min(1.0, max(0.0, gini));
+      }
 
       c.history.add(
         YearlyMetrics(
@@ -583,10 +718,12 @@ class SimulationEngine extends ChangeNotifier {
           ammLiquidity: currentAmmLiquidity,
           totalDomesticMoney: totalDomesticMoney,
           netTradeBalance: netTradeBal,
+          grossTradeVolume: grossTradeVol,
+          giniIndex: gini,
+          avgHwi: avgHwi, // ★追加
         ),
       );
 
-      // ★追加: 履歴が100件を超えたら一番古い年を削除してメモリを節約
       if (c.history.length > 100) {
         c.history.removeAt(0);
       }
@@ -619,7 +756,6 @@ class SimulationEngine extends ChangeNotifier {
     int winnersCount,
   ) {
     res.availableAmount -= reqAmt;
-    // 上限を70kgとし、回復量を+2.0に設定
     if (rType == 'Food')
       buyer.weight = min(70.0, buyer.weight + 2.0);
     else if (rType == 'Wood')
@@ -641,7 +777,6 @@ class SimulationEngine extends ChangeNotifier {
     buyer.lastYearActivities.add(
       "Failed to buy $rType from ${sellerC.name} (Insufficient post-swap funds).",
     );
-    // 食料が買えなかった場合は体重が減少するのみ
     if (rType == 'Food') buyer.weight -= 5.0;
   }
 
@@ -677,7 +812,6 @@ class SimulationEngine extends ChangeNotifier {
     notifyListeners();
   }
 
-  // 輸出禁止措置の設定メソッド
   void updateExportBan(Country c, String resType, bool isBanned) {
     c.exportBans[resType] = isBanned;
     c.save();
@@ -688,7 +822,6 @@ class SimulationEngine extends ChangeNotifier {
     notifyListeners();
   }
 
-  // 食料の自国民優先設定メソッド
   void updateFoodDomesticPriority(Country c, bool isPrioritized) {
     c.foodDomesticPriority = isPrioritized;
     c.save();
@@ -696,6 +829,84 @@ class SimulationEngine extends ChangeNotifier {
     logUserAction(
       'Policy Update: ${c.name} has $status Food Domestic Priority.',
     );
+    notifyListeners();
+  }
+
+  void updateUbiPayoutRatio(Country c, double ratio) {
+    double old = c.ubiPayoutRatio;
+    c.ubiPayoutRatio = max(0.0, min(1.0, ratio));
+    c.save();
+    logUserAction(
+      'Policy Update: ${c.name} changed UBI Payout Ratio from ${(old * 100).toInt()}% to ${(c.ubiPayoutRatio * 100).toInt()}%',
+    );
+    notifyListeners();
+  }
+
+  void updateProgressiveUbi(Country c, bool isProgressive) {
+    c.useProgressiveUbi = isProgressive;
+    c.save();
+    String status = isProgressive
+        ? "Progressive (Welfare)"
+        : "Flat (Universal)";
+    logUserAction(
+      'Policy Update: ${c.name} changed UBI Distribution to $status.',
+    );
+    notifyListeners();
+  }
+
+  void executeCurrencyIntervention(
+    Country c,
+    String sourceCur,
+    String targetCur,
+    double amount,
+  ) {
+    GlobalExchange exchange = globalExchange;
+    double poolIn = exchange.liquidityPool[sourceCur] ?? 0.0;
+    double poolOut = exchange.liquidityPool[targetCur] ?? 0.0;
+
+    if (poolIn <= 0 || poolOut <= 0 || amount <= 0) return;
+
+    // フェイルセーフ: 政府の金庫にある売却通貨の在庫チェック
+    double currentReserveSrc = c.reserves[sourceCur] ?? 0.0;
+    if (amount > currentReserveSrc) {
+      amount = currentReserveSrc;
+    }
+
+    if (amount <= 0) return;
+
+    // AMM定数積モデル (X * Y = K) に基づくスワップ取得額の逆算
+    // Delta Y = (Y * Delta X) / (X + Delta X)
+    double outAmount = (poolOut * amount) / (poolIn + amount);
+
+    // フェイルセーフ: 両替所（AMM）の枯渇回避（最大でもプールの99%に抑える）
+    if (outAmount >= poolOut) {
+      outAmount = poolOut * 0.99;
+    }
+
+    if (outAmount <= 0) return;
+
+    // 政府の金庫（Reserves）の更新
+    c.reserves[sourceCur] = currentReserveSrc - amount;
+    c.reserves[targetCur] = (c.reserves[targetCur] ?? 0.0) + outAmount;
+
+    // 地球共通両替所（AMM）プールの更新
+    exchange.liquidityPool[sourceCur] = poolIn + amount;
+    exchange.liquidityPool[targetCur] = poolOut - outAmount;
+
+    // データの保存
+    c.save();
+    exchange.save();
+
+    // ログの記録
+    String interventionType = (sourceCur == c.currencyName)
+        ? "Devaluation (Export Boost)"
+        : "Revaluation (Value Protection)";
+
+    logUserAction(
+      'Currency Intervention [$interventionType] by ${c.name}: '
+      'Sold ${amount.toStringAsFixed(1)} $sourceCur for ${outAmount.toStringAsFixed(1)} $targetCur on Global AMM.',
+    );
+
     notifyListeners();
   }
 
@@ -730,6 +941,14 @@ class SimulationEngine extends ChangeNotifier {
       b.writeln(
         '- Currency Strength Index: ${c.currencyIndex.toStringAsFixed(4)} (vs USD)',
       );
+
+      // ★追加: 最新履歴のavgHwiとginiIndexを出力 (存在する場合)
+      if (c.history.isNotEmpty) {
+        var lastMetrics = c.history.last;
+        b.writeln(
+          '- Gini Index: ${lastMetrics.giniIndex.toStringAsFixed(3)} | Avg HWI: ${lastMetrics.avgHwi.toStringAsFixed(1)}',
+        );
+      }
 
       b.writeln('- Resources (Amt / Market Price):');
       c.resources.forEach((k, v) {

@@ -99,12 +99,13 @@ class SaveService {
         'inheritanceTaxRate': c.inheritanceTaxRate,
         'exportBans': c.exportBans,
         'foodDomesticPriority': c.foodDomesticPriority,
+        'ubiPayoutRatio': c.ubiPayoutRatio,
+        'useProgressiveUbi': c.useProgressiveUbi,
         'reserves': c.reserves,
         'currencyIndex': c.currencyIndex,
         'exportLedger': c.exportLedger,
         'importLedger': c.importLedger,
         'residentIds': c.residents.map((r) => r.id).toList(),
-        // 資源データの抽出を正確に追記
         'resources': c.resources.map(
           (k, v) => MapEntry(k, {
             'type': v.type,
@@ -132,6 +133,9 @@ class SaveService {
                 'ammLiquidity': h.ammLiquidity,
                 'totalDomesticMoney': h.totalDomesticMoney,
                 'netTradeBalance': h.netTradeBalance,
+                'grossTradeVolume': h.grossTradeVolume,
+                'giniIndex': h.giniIndex,
+                'avgHwi': h.avgHwi, // ★追加
               },
             )
             .toList();
@@ -260,6 +264,9 @@ class SaveService {
               ammLiquidity: (h['ammLiquidity'] as num).toDouble(),
               totalDomesticMoney: (h['totalDomesticMoney'] as num).toDouble(),
               netTradeBalance: (h['netTradeBalance'] as num).toDouble(),
+              grossTradeVolume: (h['grossTradeVolume'] as num).toDouble(),
+              giniIndex: (h['giniIndex'] as num).toDouble(),
+              avgHwi: (h['avgHwi'] as num?)?.toDouble() ?? 0.0, // ★追加
             ),
           );
         }
@@ -299,6 +306,8 @@ class SaveService {
         inheritanceTaxRate: (cMap['inheritanceTaxRate'] as num).toDouble(),
         exportBans: Map<String, bool>.from(cMap['exportBans']),
         foodDomesticPriority: cMap['foodDomesticPriority'] ?? false,
+        ubiPayoutRatio: (cMap['ubiPayoutRatio'] as num?)?.toDouble() ?? 1.0,
+        useProgressiveUbi: cMap['useProgressiveUbi'] as bool? ?? false,
         reserves: Map<String, double>.from(
           (cMap['reserves'] as Map).map(
             (k, v) => MapEntry(k, (v as num).toDouble()),
