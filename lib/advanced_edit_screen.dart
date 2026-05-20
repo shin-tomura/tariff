@@ -27,15 +27,26 @@ class _AdvancedEditScreenState extends State<AdvancedEditScreen> {
   final _civMetalCtrl = TextEditingController();
 
   final List<String> _globalCurrencies = ['USD', 'CNY', 'JPY'];
+  final List<String> _resourceTypes = ['Food', 'Wood', 'Metal', 'Oil'];
 
   // 両替所の流動性プール編集用コントローラー
   final Map<String, TextEditingController> _poolCtrls = {};
+
+  // ★追加: シミュレーションルール編集用コントローラー
+  final Map<String, TextEditingController> _annualConsCtrls = {};
+  final Map<String, TextEditingController> _resDepCtrls = {};
+  final Map<String, TextEditingController> _ctyDepCtrls = {};
 
   @override
   void initState() {
     super.initState();
     for (var cur in _globalCurrencies) {
       _poolCtrls[cur] = TextEditingController();
+    }
+    for (var res in _resourceTypes) {
+      _annualConsCtrls[res] = TextEditingController();
+      _resDepCtrls[res] = TextEditingController();
+      _ctyDepCtrls[res] = TextEditingController();
     }
   }
 
@@ -50,6 +61,11 @@ class _AdvancedEditScreenState extends State<AdvancedEditScreen> {
     _civMetalCtrl.dispose();
     for (var ctrl in _poolCtrls.values) {
       ctrl.dispose();
+    }
+    for (var res in _resourceTypes) {
+      _annualConsCtrls[res]?.dispose();
+      _resDepCtrls[res]?.dispose();
+      _ctyDepCtrls[res]?.dispose();
     }
     super.dispose();
   }
@@ -91,6 +107,22 @@ class _AdvancedEditScreenState extends State<AdvancedEditScreen> {
     var exchange = engine.globalExchange;
     for (var cur in _globalCurrencies) {
       _poolCtrls[cur]?.text = (exchange.liquidityPool[cur] ?? 0.0)
+          .toStringAsFixed(2);
+    }
+    setState(() {});
+  }
+
+  // ★追加: シミュレーションルールの読み込み
+  void _loadSimulationRules() {
+    var settings = Hive.box('settings');
+    SimulationSettings rules =
+        settings.get('sim_rules') ?? SimulationSettings();
+    for (var res in _resourceTypes) {
+      _annualConsCtrls[res]?.text = (rules.annualConsumption[res] ?? 10.0)
+          .toStringAsFixed(2);
+      _resDepCtrls[res]?.text = (rules.residentDepreciationRates[res] ?? 0.0)
+          .toStringAsFixed(2);
+      _ctyDepCtrls[res]?.text = (rules.countryDepreciationRates[res] ?? 0.0)
           .toStringAsFixed(2);
     }
     setState(() {});
@@ -195,6 +227,37 @@ class _AdvancedEditScreenState extends State<AdvancedEditScreen> {
           'God Mode [Global Exchange AMM]: ${changes.join(", ")}',
         );
       }
+    } else if (_editCategory == 'Simulation Rules') {
+      // ★追加: シミュレーションルールの保存
+      var settings = Hive.box('settings');
+      SimulationSettings rules =
+          settings.get('sim_rules') ?? SimulationSettings();
+
+      for (var res in _resourceTypes) {
+        double oldCons = rules.annualConsumption[res] ?? 10.0;
+        double nCons = double.tryParse(_annualConsCtrls[res]!.text) ?? oldCons;
+        _checkNum('Annual Consumption ($res)', oldCons, nCons);
+        rules.annualConsumption[res] = nCons;
+
+        double oldResDep = rules.residentDepreciationRates[res] ?? 0.0;
+        double nResDep = double.tryParse(_resDepCtrls[res]!.text) ?? oldResDep;
+        _checkNum('Resident Dep Rate ($res)', oldResDep, nResDep);
+        rules.residentDepreciationRates[res] = nResDep;
+
+        double oldCtyDep = rules.countryDepreciationRates[res] ?? 0.0;
+        double nCtyDep = double.tryParse(_ctyDepCtrls[res]!.text) ?? oldCtyDep;
+        _checkNum('Country Dep Rate ($res)', oldCtyDep, nCtyDep);
+        rules.countryDepreciationRates[res] = nCtyDep;
+      }
+
+      settings.put('sim_rules', rules);
+      if (rules.isInBox) rules.save();
+
+      if (changes.isNotEmpty) {
+        engine.logUserAction(
+          'God Mode [Simulation Rules]: ${changes.join(", ")}',
+        );
+      }
     }
 
     ScaffoldMessenger.of(context).showSnackBar(
@@ -233,6 +296,7 @@ class _AdvancedEditScreenState extends State<AdvancedEditScreen> {
                             'Resident Base',
                             'Global Exchange',
                             'Global Settings',
+                            'Simulation Rules', // ★追加
                           ]
                           .map(
                             (e) => DropdownMenuItem(
@@ -258,6 +322,8 @@ class _AdvancedEditScreenState extends State<AdvancedEditScreen> {
                         _loadGlobalSettings();
                       } else if (_editCategory == 'Global Exchange') {
                         _loadGlobalExchangeData(engine);
+                      } else if (_editCategory == 'Simulation Rules') {
+                        _loadSimulationRules(); // ★追加
                       }
                     });
                   },
@@ -265,6 +331,61 @@ class _AdvancedEditScreenState extends State<AdvancedEditScreen> {
               ),
             ),
             const SizedBox(height: 20),
+
+            if (_editCategory == 'Simulation Rules') ...[
+              const Text(
+                'Annual Consumption per Resident',
+                style: TextStyle(
+                  color: Colors.amber,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 18,
+                ),
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                'The base amount of each resource a resident attempts to secure every year.',
+                style: TextStyle(color: Colors.white70),
+              ),
+              const SizedBox(height: 12),
+              for (var res in _resourceTypes)
+                _buildNumField('$res Target Amount', _annualConsCtrls[res]!),
+              const SizedBox(height: 30),
+
+              const Text(
+                'Resident Depreciation Rates (0.0 to 1.0)',
+                style: TextStyle(
+                  color: Colors.orangeAccent,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 18,
+                ),
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                'How much of a resident\'s privately hoarded stock disappears each year. (e.g., 0.1 = 10% lost, 1.0 = 100% lost)',
+                style: TextStyle(color: Colors.white70),
+              ),
+              const SizedBox(height: 12),
+              for (var res in _resourceTypes)
+                _buildNumField('$res Rate', _resDepCtrls[res]!),
+              const SizedBox(height: 30),
+
+              const Text(
+                'Country Depreciation Rates (0.0 to 1.0)',
+                style: TextStyle(
+                  color: Colors.lightBlueAccent,
+                  fontWeight: FontWeight.bold,
+                  fontSize: 18,
+                ),
+              ),
+              const SizedBox(height: 6),
+              const Text(
+                'How much of the unsold market inventory disappears each year before new production is added.',
+                style: TextStyle(color: Colors.white70),
+              ),
+              const SizedBox(height: 12),
+              for (var res in _resourceTypes)
+                _buildNumField('$res Rate', _ctyDepCtrls[res]!),
+            ],
 
             if (_editCategory == 'Global Exchange') ...[
               const Text(
@@ -392,7 +513,8 @@ class _AdvancedEditScreenState extends State<AdvancedEditScreen> {
                 (_editCategory == 'Resident Base' &&
                     _selectedResident != null) ||
                 (_editCategory == 'Global Exchange') ||
-                (_editCategory == 'Global Settings'))
+                (_editCategory == 'Global Settings') ||
+                (_editCategory == 'Simulation Rules')) // ★追加
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(

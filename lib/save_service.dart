@@ -75,15 +75,17 @@ class SaveService {
 
     final Map<String, dynamic> masterData = {};
 
-    masterData['currentYear'] = settingsBox.get('currentYear', defaultValue: 1);
-    masterData['civWoodThreshold'] = settingsBox.get(
-      'civWoodThreshold',
-      defaultValue: 20.0,
-    );
-    masterData['civMetalThreshold'] = settingsBox.get(
-      'civMetalThreshold',
-      defaultValue: 30.0,
-    );
+    masterData['currentYear'] = settingsBox.get('currentYear');
+    masterData['civWoodThreshold'] = settingsBox.get('civWoodThreshold');
+    masterData['civMetalThreshold'] = settingsBox.get('civMetalThreshold');
+
+    // シミュレーションルール設定の抽出
+    final simRules = settingsBox.get('sim_rules') as SimulationSettings;
+    masterData['sim_rules'] = {
+      'annualConsumption': simRules.annualConsumption,
+      'residentDepreciationRates': simRules.residentDepreciationRates,
+      'countryDepreciationRates': simRules.countryDepreciationRates,
+    };
 
     if (exchangeBox.isNotEmpty) {
       masterData['exchange'] = exchangeBox.values.first.liquidityPool;
@@ -135,7 +137,11 @@ class SaveService {
                 'netTradeBalance': h.netTradeBalance,
                 'grossTradeVolume': h.grossTradeVolume,
                 'giniIndex': h.giniIndex,
-                'avgHwi': h.avgHwi, // ★追加
+                'avgHwi': h.avgHwi,
+                // ★追加: 各資源の市場在庫量
+                'woodInventory': h.woodInventory,
+                'metalInventory': h.metalInventory,
+                'oilInventory': h.oilInventory,
               },
             )
             .toList();
@@ -198,6 +204,27 @@ class SaveService {
     await settingsBox.put('currentYear', masterData['currentYear']);
     await settingsBox.put('civWoodThreshold', masterData['civWoodThreshold']);
     await settingsBox.put('civMetalThreshold', masterData['civMetalThreshold']);
+
+    // シミュレーションルール設定の復元（後方互換のフォールバックなし）
+    final Map<String, dynamic> rulesMap = masterData['sim_rules'];
+    final simRules = SimulationSettings(
+      annualConsumption: Map<String, double>.from(
+        (rulesMap['annualConsumption'] as Map).map(
+          (k, v) => MapEntry(k, (v as num).toDouble()),
+        ),
+      ),
+      residentDepreciationRates: Map<String, double>.from(
+        (rulesMap['residentDepreciationRates'] as Map).map(
+          (k, v) => MapEntry(k, (v as num).toDouble()),
+        ),
+      ),
+      countryDepreciationRates: Map<String, double>.from(
+        (rulesMap['countryDepreciationRates'] as Map).map(
+          (k, v) => MapEntry(k, (v as num).toDouble()),
+        ),
+      ),
+    );
+    await settingsBox.put('sim_rules', simRules);
 
     if (masterData.containsKey('exchange')) {
       final Map<String, double> pool = Map<String, double>.from(
@@ -266,32 +293,27 @@ class SaveService {
               netTradeBalance: (h['netTradeBalance'] as num).toDouble(),
               grossTradeVolume: (h['grossTradeVolume'] as num).toDouble(),
               giniIndex: (h['giniIndex'] as num).toDouble(),
-              avgHwi: (h['avgHwi'] as num?)?.toDouble() ?? 0.0, // ★追加
+              avgHwi: (h['avgHwi'] as num).toDouble(),
+              // ★追加: 各資源の市場在庫量
+              woodInventory: (h['woodInventory'] as num).toDouble(),
+              metalInventory: (h['metalInventory'] as num).toDouble(),
+              oilInventory: (h['oilInventory'] as num).toDouble(),
             ),
           );
         }
       }
 
       final Map<String, ResourceInfo> resourcesMap = {};
-      final Map<String, dynamic> resData = cMap['resources'] ?? {};
+      final Map<String, dynamic> resData = cMap['resources'];
       final List<String> resourceKeys = ['Food', 'Wood', 'Metal', 'Oil'];
       for (var key in resourceKeys) {
-        if (resData.containsKey(key)) {
-          var rMap = resData[key];
-          resourcesMap[key] = ResourceInfo(
-            type: rMap['type'] ?? key,
-            availableAmount: (rMap['availableAmount'] as num).toDouble(),
-            annualProduction: (rMap['annualProduction'] as num).toDouble(),
-            lastMarketPrice: (rMap['lastMarketPrice'] as num).toDouble(),
-          );
-        } else {
-          resourcesMap[key] = ResourceInfo(
-            type: key,
-            availableAmount: 0,
-            annualProduction: 10,
-            lastMarketPrice: 1.0,
-          );
-        }
+        var rMap = resData[key];
+        resourcesMap[key] = ResourceInfo(
+          type: rMap['type'],
+          availableAmount: (rMap['availableAmount'] as num).toDouble(),
+          annualProduction: (rMap['annualProduction'] as num).toDouble(),
+          lastMarketPrice: (rMap['lastMarketPrice'] as num).toDouble(),
+        );
       }
 
       final country = Country(
@@ -305,9 +327,9 @@ class SaveService {
         ),
         inheritanceTaxRate: (cMap['inheritanceTaxRate'] as num).toDouble(),
         exportBans: Map<String, bool>.from(cMap['exportBans']),
-        foodDomesticPriority: cMap['foodDomesticPriority'] ?? false,
-        ubiPayoutRatio: (cMap['ubiPayoutRatio'] as num?)?.toDouble() ?? 1.0,
-        useProgressiveUbi: cMap['useProgressiveUbi'] as bool? ?? false,
+        foodDomesticPriority: cMap['foodDomesticPriority'] as bool,
+        ubiPayoutRatio: (cMap['ubiPayoutRatio'] as num).toDouble(),
+        useProgressiveUbi: cMap['useProgressiveUbi'] as bool,
         reserves: Map<String, double>.from(
           (cMap['reserves'] as Map).map(
             (k, v) => MapEntry(k, (v as num).toDouble()),
@@ -332,7 +354,7 @@ class SaveService {
       await cBox.add(country);
     }
 
-    if (masterData.containsKey('logs') && masterData['logs'] != null) {
+    if (masterData['logs'] != null) {
       for (var lMap in masterData['logs']) {
         await logBox.add(
           EventLog(

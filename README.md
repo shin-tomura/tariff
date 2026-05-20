@@ -139,3 +139,7 @@ This project is licensed under the MIT License - see the source files for detail
 ---
 
 ## 🔄 Changelog
+
+### v1.0.2
+- App Store Release.
+

@@ -23,17 +23,22 @@ class _ChartScreenState extends State<ChartScreen> {
   final Map<String, bool> _allowNegativeY = {
     'Currency Strength Index (Calculated Base)': false,
     'Net Trade Balance (Local Currency)': true,
-    'Gross Trade Volume (Base Currency Eq.)': false,
+    'Gross Trade Volume (Real Volume Base)': false,
     'AMM Liquidity Pool (Local Currency)': false,
     'Total Domestic Money (Local Currency)': false,
     'Wealth Gini Index (0.0 = Equal, 1.0 = Unequal)': false,
-    'Average HWI (Holistic Welfare Index)': false, // ★追加
+    'Average HWI (Holistic Welfare Index)': false,
+    'Real Wealth Base (Calculated)': false,
     'Average Weight (Health / Hunger Proxy)': false,
     'Average Civilization Level': false,
     'Food Market Price (Local Currency)': false,
     'Wood Market Price (Local Currency)': false,
     'Metal Market Price (Local Currency)': false,
     'Oil Market Price (Local Currency)': false,
+    // ★追加: 在庫量グラフ用の設定
+    'Wood Market Inventory (Units)': false,
+    'Metal Market Inventory (Units)': false,
+    'Oil Market Inventory (Units)': false,
   };
 
   Color _getCountryColor(String id) {
@@ -219,10 +224,12 @@ class _ChartScreenState extends State<ChartScreen> {
     );
   }
 
-  Widget _buildTradeVolumeChart(
+  // ★変更: 貿易量や在庫量など、世界合計ライン（World Total）を一緒に表示する汎用メソッド
+  Widget _buildLineChartWithTotal(
     String title,
     List<Country> visibleCountries,
-    List<Country> allCountries, {
+    List<Country> allCountries,
+    double Function(YearlyMetrics) dataExtractor, {
     int currentMaxYear = 1,
   }) {
     if (allCountries.isEmpty || allCountries.first.history.isEmpty) {
@@ -246,7 +253,7 @@ class _ChartScreenState extends State<ChartScreen> {
     List<LineChartBarData> lineBars = [];
     bool hasData = false;
 
-    // 1. 各国のライン (基軸通貨換算)
+    // 1. 各国のライン
     for (var country in visibleCountries) {
       List<FlSpot> spots = [];
       var filteredHistory = country.history
@@ -259,8 +266,7 @@ class _ChartScreenState extends State<ChartScreen> {
       for (var h in filteredHistory) {
         hasData = true;
         int displayYear = h.year + 1;
-        // ローカル通貨の総貿易量を、基軸通貨(USD相当)に換算してスケールを統一
-        double val = h.grossTradeVolume;
+        double val = dataExtractor(h);
 
         if (val < minY) minY = val;
         if (val > maxY) maxY = val;
@@ -302,7 +308,7 @@ class _ChartScreenState extends State<ChartScreen> {
           (element) => element.year == baseHistory[i].year,
           orElse: () => baseHistory[i],
         );
-        worldTotal += targetH.grossTradeVolume;
+        worldTotal += dataExtractor(targetH);
       }
 
       if (worldTotal < minY) minY = worldTotal;
@@ -337,7 +343,10 @@ class _ChartScreenState extends State<ChartScreen> {
       maxY += padding;
     }
 
-    if (minY < 0) minY = 0.0; // 総貿易量はマイナスにならないためゼロクリッピング
+    bool allowNegative = _allowNegativeY[title] ?? true;
+    if (!allowNegative && minY < 0) {
+      minY = 0.0;
+    }
 
     if (actualMinX >= actualMaxX) {
       actualMinX = max(1, actualMinX - 1);
@@ -411,7 +420,7 @@ class _ChartScreenState extends State<ChartScreen> {
                     ],
                   );
                 }).toList(),
-                // World Total用の凡例を追加
+                // World Total用の凡例
                 Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -723,10 +732,11 @@ class _ChartScreenState extends State<ChartScreen> {
             currentMaxYear: currentMaxYear,
           ),
 
-          _buildTradeVolumeChart(
+          _buildLineChartWithTotal(
             'Gross Trade Volume (Real Volume Base)',
             visibleCountriesList,
             allCountries,
+            (m) => m.grossTradeVolume,
             currentMaxYear: currentMaxYear,
           ),
 
@@ -751,7 +761,6 @@ class _ChartScreenState extends State<ChartScreen> {
             currentMaxYear: currentMaxYear,
           ),
 
-          // ★追加: HWIのグラフ
           _buildLineChart(
             'Average HWI (Holistic Welfare Index)',
             visibleCountriesList,
@@ -794,6 +803,29 @@ class _ChartScreenState extends State<ChartScreen> {
             'Oil Market Price (Local Currency)',
             visibleCountriesList,
             (m, c) => m.oilPrice,
+            currentMaxYear: currentMaxYear,
+          ),
+
+          // ★追加: 在庫量(余剰量)のグラフ (各国の保有量 + 世界総在庫の白破線)
+          _buildLineChartWithTotal(
+            'Wood Market Inventory (Units)',
+            visibleCountriesList,
+            allCountries,
+            (m) => m.woodInventory,
+            currentMaxYear: currentMaxYear,
+          ),
+          _buildLineChartWithTotal(
+            'Metal Market Inventory (Units)',
+            visibleCountriesList,
+            allCountries,
+            (m) => m.metalInventory,
+            currentMaxYear: currentMaxYear,
+          ),
+          _buildLineChartWithTotal(
+            'Oil Market Inventory (Units)',
+            visibleCountriesList,
+            allCountries,
+            (m) => m.oilInventory,
             currentMaxYear: currentMaxYear,
           ),
         ],

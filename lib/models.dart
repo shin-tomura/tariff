@@ -1,5 +1,41 @@
 import 'package:hive/hive.dart';
 
+// --- 新設: シミュレーションの基本ルール設定 ---
+class SimulationSettings extends HiveObject {
+  // 住人1人あたりの各資源の年間消費量（要求量）
+  Map<String, double> annualConsumption;
+
+  // 住民保有資源のターン経過時の消滅率 (0.0: 全く消滅しない 〜 1.0: 100%消滅)
+  Map<String, double> residentDepreciationRates;
+
+  // 国家(市場)保有資源のターン経過時の消滅率 (0.0: 全く消滅しない 〜 1.0: 100%消滅)
+  Map<String, double> countryDepreciationRates;
+
+  SimulationSettings({
+    Map<String, double>? annualConsumption,
+    Map<String, double>? residentDepreciationRates,
+    Map<String, double>? countryDepreciationRates,
+  }) : annualConsumption =
+           annualConsumption ??
+           {'Food': 10.0, 'Wood': 10.0, 'Metal': 10.0, 'Oil': 10.0},
+       residentDepreciationRates =
+           residentDepreciationRates ??
+           {
+             'Food': 1.0, // 食料は体重に変換されるため実質ストック不可(100%消滅)
+             'Wood': 0.10, // 旧仕様: 10%消滅
+             'Metal': 0.05, // 旧仕様: 5%消滅
+             'Oil': 1.0, // 旧仕様: 100%消滅
+           },
+       countryDepreciationRates =
+           countryDepreciationRates ??
+           {
+             'Food': 1.0, // 旧仕様: 前年分は全消滅
+             'Wood': 0.0, // 旧仕様: 消滅しない(完全蓄積)
+             'Metal': 0.0, // 旧仕様: 消滅しない(完全蓄積)
+             'Oil': 0.0, // 旧仕様: 消滅しない(完全蓄積)
+           };
+}
+
 class Country extends HiveObject {
   String id;
   String name;
@@ -140,8 +176,13 @@ class YearlyMetrics extends HiveObject {
   // ジニ係数 (0.0=完全平等, 1.0=完全不平等)
   double giniIndex;
 
-  // ★追加: 総合幸福度指数 (Holistic Welfare Index) の平均値
+  // 総合幸福度指数 (Holistic Welfare Index) の平均値
   double avgHwi;
+
+  // ★追加: 各資源の市場在庫量（余剰量）
+  double woodInventory;
+  double metalInventory;
+  double oilInventory;
 
   YearlyMetrics({
     required this.year,
@@ -159,7 +200,10 @@ class YearlyMetrics extends HiveObject {
     this.netTradeBalance = 0.0,
     this.grossTradeVolume = 0.0,
     this.giniIndex = 0.0,
-    this.avgHwi = 0.0, // ★追加
+    this.avgHwi = 0.0,
+    this.woodInventory = 0.0,
+    this.metalInventory = 0.0,
+    this.oilInventory = 0.0,
   });
 }
 
@@ -172,6 +216,7 @@ class GlobalExchange extends HiveObject {
 }
 
 // --- Hive Adapters ---
+
 class CountryAdapter extends TypeAdapter<Country> {
   @override
   final int typeId = 0;
@@ -306,7 +351,11 @@ class YearlyMetricsAdapter extends TypeAdapter<YearlyMetrics> {
     netTradeBalance: reader.readDouble(),
     grossTradeVolume: reader.readDouble(),
     giniIndex: reader.readDouble(),
-    avgHwi: reader.readDouble(), // ★追加
+    avgHwi: reader.readDouble(),
+    // ★追加分を読み込む
+    woodInventory: reader.readDouble(),
+    metalInventory: reader.readDouble(),
+    oilInventory: reader.readDouble(),
   );
   @override
   void write(BinaryWriter writer, YearlyMetrics obj) {
@@ -325,7 +374,11 @@ class YearlyMetricsAdapter extends TypeAdapter<YearlyMetrics> {
     writer.writeDouble(obj.netTradeBalance);
     writer.writeDouble(obj.grossTradeVolume);
     writer.writeDouble(obj.giniIndex);
-    writer.writeDouble(obj.avgHwi); // ★追加
+    writer.writeDouble(obj.avgHwi);
+    // ★追加分を書き込む
+    writer.writeDouble(obj.woodInventory);
+    writer.writeDouble(obj.metalInventory);
+    writer.writeDouble(obj.oilInventory);
   }
 }
 
@@ -338,5 +391,25 @@ class GlobalExchangeAdapter extends TypeAdapter<GlobalExchange> {
   @override
   void write(BinaryWriter writer, GlobalExchange obj) {
     writer.writeMap(obj.liquidityPool);
+  }
+}
+
+class SimulationSettingsAdapter extends TypeAdapter<SimulationSettings> {
+  @override
+  final int typeId = 6;
+  @override
+  SimulationSettings read(BinaryReader reader) {
+    return SimulationSettings(
+      annualConsumption: Map<String, double>.from(reader.readMap()),
+      residentDepreciationRates: Map<String, double>.from(reader.readMap()),
+      countryDepreciationRates: Map<String, double>.from(reader.readMap()),
+    );
+  }
+
+  @override
+  void write(BinaryWriter writer, SimulationSettings obj) {
+    writer.writeMap(obj.annualConsumption);
+    writer.writeMap(obj.residentDepreciationRates);
+    writer.writeMap(obj.countryDepreciationRates);
   }
 }

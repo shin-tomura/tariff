@@ -27,6 +27,7 @@ void main() async {
   Hive.registerAdapter(EventLogAdapter());
   Hive.registerAdapter(YearlyMetricsAdapter());
   Hive.registerAdapter(GlobalExchangeAdapter());
+  Hive.registerAdapter(SimulationSettingsAdapter()); // 設定用アダプター
 
   await Hive.openBox<Resident>('residents');
   await Hive.openBox<Country>('countries');
@@ -47,10 +48,49 @@ void main() async {
 Future<void> _initializeDataIfEmpty() async {
   var cBox = Hive.box<Country>('countries');
   var rBox = Hive.box<Resident>('residents');
+
   if (cBox.isEmpty) {
     var settings = Hive.box('settings');
+    // 【1】文明レベルの閾値
     settings.put('civWoodThreshold', 20.0);
     settings.put('civMetalThreshold', 30.0);
+    settings.put('currentYear', 1);
+
+    // 【2】シミュレーション設定の最適化（需給バランスと維持費の調整）
+    if (!settings.containsKey('sim_rules')) {
+      settings.put(
+        'sim_rules',
+        SimulationSettings(
+          // ---------------------------------------------------
+          // ① 年間消費量（世界人口30人に対する生産量にジャストフィット）
+          // ---------------------------------------------------
+          annualConsumption: {
+            'Food': 12.0, // 世界総生産360にマッチ
+            'Wood': 6.0, // 世界総生産180にマッチ
+            'Metal': 5.0, // 世界総生産150にマッチ
+            'Oil': 1.5, // 世界総生産45にマッチ
+          },
+          // ---------------------------------------------------
+          // ② 住民の消滅率（「閾値ギリギリ」をキープさせる絶妙な調整）
+          // ---------------------------------------------------
+          residentDepreciationRates: {
+            'Food': 1.0,
+            'Wood': 0.20,
+            'Metal': 0.10,
+            'Oil': 1.0,
+          },
+          // ---------------------------------------------------
+          // ③ 国家の消滅率は微調整（過剰在庫対策）
+          // ---------------------------------------------------
+          countryDepreciationRates: {
+            'Food': 1.0,
+            'Wood': 0.15,
+            'Metal': 0.10,
+            'Oil': 0.05,
+          },
+        ),
+      );
+    }
 
     List<String> ids = ['USA', 'CHN', 'JPN'];
     List<String> cNames = ['America', 'China', 'Japan'];
@@ -59,42 +99,53 @@ Future<void> _initializeDataIfEmpty() async {
     for (int i = 0; i < 3; i++) {
       HiveList<Resident> hRes = HiveList(rBox);
       for (int j = 0; j < 10; j++) {
+        // ---------------------------------------------------
+        // ④ 初期状態の非同期化（スパイダーウェブ現象の完全防止）
+        // ---------------------------------------------------
         var r = Resident(
           id: '${ids[i]}_r$j',
           name: '${cNames[i]} Citizen $j',
           age: j,
           weight: 60.0,
-          wallet: {currencies[i]: 500.0},
+          wallet: {currencies[i]: 300.0 + (j * 40.0)},
         );
+
+        // 最初から文明レベル2以上の富裕層（年長者）を市場に混ぜておく
+        r.woodStock = j * 2.5;
+        r.metalStock = j > 5 ? (j - 5) * 5.0 : 0.0;
+
         rBox.add(r);
         hRes.add(r);
       }
 
-      // 国ごとのリアルな資源設定
+      // ---------------------------------------------------
+      // ⑤ 国ごとのリアルな資源設定（AMERICA FIRST 仕様）
+      // 世界の総生産量をUSAに大きく偏らせ、覇権を握らせる
+      // ---------------------------------------------------
       Map<String, ResourceInfo> countryResources = {};
       if (ids[i] == 'USA') {
         countryResources = {
           'Food': ResourceInfo(
             type: 'Food',
             availableAmount: 0,
-            annualProduction: 200,
+            annualProduction: 180,
             lastMarketPrice: 10.0,
           ),
           'Wood': ResourceInfo(
             type: 'Wood',
-            availableAmount: 100,
+            availableAmount: 50,
             annualProduction: 80,
             lastMarketPrice: 20.0,
           ),
           'Metal': ResourceInfo(
             type: 'Metal',
             availableAmount: 50,
-            annualProduction: 30,
+            annualProduction: 70,
             lastMarketPrice: 50.0,
           ),
           'Oil': ResourceInfo(
             type: 'Oil',
-            availableAmount: 50,
+            availableAmount: 30,
             annualProduction: 30,
             lastMarketPrice: 100.0,
           ),
@@ -110,19 +161,19 @@ Future<void> _initializeDataIfEmpty() async {
           'Wood': ResourceInfo(
             type: 'Wood',
             availableAmount: 50,
-            annualProduction: 30,
+            annualProduction: 70,
             lastMarketPrice: 20.0,
           ),
           'Metal': ResourceInfo(
             type: 'Metal',
-            availableAmount: 80,
+            availableAmount: 50,
             annualProduction: 60,
             lastMarketPrice: 50.0,
           ),
           'Oil': ResourceInfo(
             type: 'Oil',
-            availableAmount: 20,
-            annualProduction: 10,
+            availableAmount: 15,
+            annualProduction: 15,
             lastMarketPrice: 100.0,
           ),
         };
@@ -131,19 +182,19 @@ Future<void> _initializeDataIfEmpty() async {
           'Food': ResourceInfo(
             type: 'Food',
             availableAmount: 0,
-            annualProduction: 40,
+            annualProduction: 30,
             lastMarketPrice: 10.0,
           ),
           'Wood': ResourceInfo(
             type: 'Wood',
-            availableAmount: 80,
-            annualProduction: 40,
+            availableAmount: 20,
+            annualProduction: 30,
             lastMarketPrice: 20.0,
           ),
           'Metal': ResourceInfo(
             type: 'Metal',
             availableAmount: 10,
-            annualProduction: 5,
+            annualProduction: 20,
             lastMarketPrice: 50.0,
           ),
           'Oil': ResourceInfo(
@@ -283,6 +334,7 @@ class DashboardScreen extends StatelessWidget {
 
       // エンジンの状態をリセットしてUIを再描画
       engine.currentYear = 1;
+      await Hive.box('settings').put('currentYear', 1);
       engine.logUserAction('Simulation Factory Reset (Returned to Year 1).');
 
       ScaffoldMessenger.of(context).showSnackBar(
@@ -464,7 +516,6 @@ class DashboardScreen extends StatelessWidget {
                 );
               },
             ),
-
             ListTile(
               leading: const Icon(Icons.menu_book, color: Colors.amber),
               title: const Text(
@@ -550,16 +601,6 @@ class DashboardScreen extends StatelessWidget {
                       ? residentLocalMoney / c.residents.length
                       : 0.0;
 
-                  double realWealth = 0.0;
-                  realWealth +=
-                      (c.resources['Food']?.annualProduction ?? 0.0) * 1.0;
-                  realWealth +=
-                      (c.resources['Wood']?.annualProduction ?? 0.0) * 2.0;
-                  realWealth +=
-                      (c.resources['Metal']?.annualProduction ?? 0.0) * 5.0;
-                  realWealth +=
-                      (c.resources['Oil']?.annualProduction ?? 0.0) * 10.0;
-
                   // エンジン側で計算済みの最新指標を取得
                   double gini = c.history.isNotEmpty
                       ? c.history.last.giniIndex
@@ -582,6 +623,17 @@ class DashboardScreen extends StatelessWidget {
                       .map((e) => e.key)
                       .join(', ');
                   if (bannedItems.isEmpty) bannedItems = "None";
+
+                  // ★追加・変更: ダッシュボード上で流動性プールからリアルタイムの対USDレートを計算する
+                  double poolUsd =
+                      engine.globalExchange.liquidityPool['USD'] ?? 1.0;
+                  double poolLocal =
+                      engine.globalExchange.liquidityPool[c.currencyName] ??
+                      1.0;
+                  // 万が一0割りを防ぐ
+                  double liveCurrencyIndex = poolLocal > 0
+                      ? (poolUsd / poolLocal)
+                      : 0.0;
 
                   return Card(
                     margin: const EdgeInsets.symmetric(
@@ -608,7 +660,8 @@ class DashboardScreen extends StatelessWidget {
                               ),
                               Flexible(
                                 child: SelectableText(
-                                  'C. Index: ${c.currencyIndex.toStringAsFixed(4)}\n(vs USD)',
+                                  // ★変更: 古い c.currencyIndex ではなく、計算した liveCurrencyIndex を表示
+                                  'C. Index: ${liveCurrencyIndex.toStringAsFixed(4)}\n(vs USD)',
                                   style: const TextStyle(
                                     color: Colors.cyanAccent,
                                     fontWeight: FontWeight.bold,
@@ -826,17 +879,12 @@ class DashboardScreen extends StatelessWidget {
                                   avgResidentLocalMoney.toStringAsFixed(1),
                                   Colors.pinkAccent,
                                 ),
-                                _buildMiniStat(
-                                  'Real Wealth Base',
-                                  realWealth.toStringAsFixed(1),
-                                  Colors.blueAccent,
-                                ),
+
                                 _buildMiniStat(
                                   'Gini Index (Wealth)',
                                   gini.toStringAsFixed(3),
                                   giniColor,
                                 ),
-                                // ★追加: HWIの平均値を表示
                                 _buildMiniStat(
                                   'Avg HWI (Welfare)',
                                   avgHwi.toStringAsFixed(1),

@@ -69,7 +69,7 @@ class _EditScreenState extends State<EditScreen> {
     _metalCtrl.text = r.metalStock.toStringAsFixed(2);
     _oilCtrl.text = r.oilStock.toStringAsFixed(2);
 
-    // ★変更: 住民は自国通貨しか持てないため、自国通貨のみロードする
+    // 住民は自国通貨しか持てないため、自国通貨のみロードする
     String localCur = _selectedCountry!.currencyName;
     _walletCtrls[localCur]?.text = (r.wallet[localCur] ?? 0.0).toStringAsFixed(
       2,
@@ -132,7 +132,7 @@ class _EditScreenState extends State<EditScreen> {
       r.metalStock = nMetal;
       r.oilStock = nOil;
 
-      // ★変更: 住民は自国通貨のみセーブする
+      // 住民は自国通貨のみセーブする
       String localCur = _selectedCountry!.currencyName;
       double oldVal = r.wallet[localCur] ?? 0.0;
       double nVal = double.tryParse(_walletCtrls[localCur]!.text) ?? oldVal;
@@ -199,6 +199,7 @@ class _EditScreenState extends State<EditScreen> {
                   onPressed: () {
                     if (c.foodDomesticPriority != tempPriority) {
                       engine.updateFoodDomesticPriority(c, tempPriority);
+                      engine.notifyListeners();
                     }
                     Navigator.pop(ctx);
                     ScaffoldMessenger.of(context).showSnackBar(
@@ -268,6 +269,7 @@ class _EditScreenState extends State<EditScreen> {
                   double newRatio = parsed / 100.0;
                   if (c.ubiPayoutRatio != newRatio) {
                     engine.updateUbiPayoutRatio(c, newRatio);
+                    engine.notifyListeners();
                   }
                   Navigator.pop(ctx);
                   ScaffoldMessenger.of(context).showSnackBar(
@@ -358,6 +360,7 @@ class _EditScreenState extends State<EditScreen> {
                   onPressed: () {
                     if (c.useProgressiveUbi != isProgressive) {
                       engine.updateProgressiveUbi(c, isProgressive);
+                      engine.notifyListeners();
                     }
                     Navigator.pop(ctx);
                     ScaffoldMessenger.of(context).showSnackBar(
@@ -423,11 +426,14 @@ class _EditScreenState extends State<EditScreen> {
                     backgroundColor: Colors.deepOrange,
                   ),
                   onPressed: () {
+                    bool changed = false;
                     tempBans.forEach((resType, isBanned) {
                       if ((c.exportBans[resType] ?? false) != isBanned) {
                         engine.updateExportBan(c, resType, isBanned);
+                        changed = true;
                       }
                     });
+                    if (changed) engine.notifyListeners();
                     Navigator.pop(ctx);
                     ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(content: Text('Export Bans updated!')),
@@ -562,6 +568,7 @@ class _EditScreenState extends State<EditScreen> {
                   return;
                 }
 
+                bool changed = false;
                 newRates.forEach((key, rate) {
                   if ((from.tariffs[key] ?? 0.0) != rate) {
                     var parts = key.split(':');
@@ -572,9 +579,13 @@ class _EditScreenState extends State<EditScreen> {
                         parts[1],
                         rate,
                       );
+                      changed = true;
                     }
                   }
                 });
+
+                if (changed) engine.notifyListeners();
+
                 Navigator.pop(ctx);
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(
@@ -642,6 +653,7 @@ class _EditScreenState extends State<EditScreen> {
                   double newRate = parsed / 100.0;
                   if (c.inheritanceTaxRate != newRate) {
                     engine.updateTax(c, newRate);
+                    engine.notifyListeners();
                   }
                   Navigator.pop(ctx);
                   ScaffoldMessenger.of(context).showSnackBar(
@@ -668,7 +680,7 @@ class _EditScreenState extends State<EditScreen> {
     );
   }
 
-  // ★追加: 為替介入（Currency Intervention）のダイアログ
+  // 為替介入（Currency Intervention）のダイアログ
   void _showInterventionDialog(
     BuildContext context,
     SimulationEngine engine,
@@ -825,6 +837,11 @@ class _EditScreenState extends State<EditScreen> {
                         targetCurrency,
                         amount,
                       );
+
+                      // ★追加: 実行後に最新データを画面のフォームへ反映し、全体のUIへ変更を通知
+                      _loadCountryData(c);
+                      engine.notifyListeners();
+
                       Navigator.pop(ctx);
                       ScaffoldMessenger.of(context).showSnackBar(
                         SnackBar(
@@ -901,6 +918,7 @@ class _EditScreenState extends State<EditScreen> {
                 double amount = double.tryParse(amountCtrl.text) ?? 0.0;
                 if (amount > 0) {
                   engine.applyHelicopterMoney(c, amount);
+                  engine.notifyListeners(); // こちらも反映のために追加
                   Navigator.pop(ctx);
                   ScaffoldMessenger.of(context).showSnackBar(
                     SnackBar(
@@ -1071,7 +1089,6 @@ class _EditScreenState extends State<EditScreen> {
                         _selectedCountry!,
                       ),
                     ),
-                    // ★追加: 為替介入ボタン
                     ElevatedButton.icon(
                       icon: const Icon(Icons.currency_exchange),
                       label: const Text('Currency Intervention'),
@@ -1139,7 +1156,6 @@ class _EditScreenState extends State<EditScreen> {
                     color: Colors.cyanAccent,
                   ),
                 ),
-                // ★変更: 自国通貨のウォレット欄のみを描画
                 _buildNumField(
                   'Wallet: ${_selectedCountry!.currencyName}',
                   _walletCtrls[_selectedCountry!.currencyName]!,

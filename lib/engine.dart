@@ -11,14 +11,6 @@ class SimulationEngine extends ChangeNotifier {
   final Stopwatch _coolDownTimer = Stopwatch();
   final int ecoWaitMs = 100;
 
-  // 各資源の1年あたりの必要量（購入要求量）を定義したマップ
-  final Map<String, double> requiredResourceAmounts = {
-    'Food': 10.0,
-    'Wood': 10.0,
-    'Metal': 10.0,
-    'Oil': 10.0,
-  };
-
   SimulationEngine() {
     var settings = Hive.box('settings');
     if (settings.containsKey('currentYear')) {
@@ -30,6 +22,12 @@ class SimulationEngine extends ChangeNotifier {
           : 1;
       settings.put('currentYear', currentYear);
     }
+  }
+
+  // グローバルなシミュレーション設定を読み込むゲッター
+  SimulationSettings get simRules {
+    var box = Hive.box('settings');
+    return box.get('sim_rules') ?? SimulationSettings(); // 設定がない場合はデフォルト値を返す
   }
 
   List<Country> get countries => Hive.box<Country>('countries').values.toList();
@@ -93,6 +91,9 @@ class SimulationEngine extends ChangeNotifier {
     final allCountries = countries;
     GlobalExchange exchange = globalExchange;
 
+    // 今年の計算に使用するルール（年間消費量、消滅率）を取得
+    SimulationSettings rules = simRules;
+
     // 実質貿易量（ポイント）を記録するマップの初期化
     Map<String, double> realGrossTradeVolumes = {
       for (var c in allCountries) c.id: 0.0,
@@ -105,13 +106,13 @@ class SimulationEngine extends ChangeNotifier {
 
       for (var entry in c.resources.entries) {
         await _yieldCpu();
-        if (entry.key == 'Food') {
-          // 食料は長持ちしないため、消費されなかった分は消滅し今年の生産量のみとなる
-          entry.value.availableAmount = entry.value.annualProduction;
-        } else {
-          // それ以外の資源は在庫として蓄積される
-          entry.value.availableAmount += entry.value.annualProduction;
-        }
+
+        // 国家（市場）が保有する資源の減価処理を動的に適用
+        double depRate = rules.countryDepreciationRates[entry.key] ?? 0.0;
+        // 現在の在庫から消滅率分を減らし、そこに今年の生産量を足す
+        entry.value.availableAmount =
+            max(0.0, entry.value.availableAmount * (1.0 - depRate)) +
+            entry.value.annualProduction;
       }
 
       for (var resident in c.residents) {
@@ -209,7 +210,7 @@ class SimulationEngine extends ChangeNotifier {
       Map<String, double> ubiPool = {};
       double safePayoutRatio = max(0.0, min(1.0, c.ubiPayoutRatio));
 
-      // ★修正: UBIで国民に配るのは「自国通貨」のみに限定（外貨準備はプールに温存）
+      // UBIで国民に配るのは「自国通貨」のみに限定（外貨準備はプールに温存）
       String localCur = c.currencyName;
       double amount = c.reserves[localCur] ?? 0.0;
       double payoutAmount = amount * safePayoutRatio;
@@ -249,14 +250,29 @@ class SimulationEngine extends ChangeNotifier {
           );
         }
 
-        // --- 資源の減価 ---
-        resident.woodStock = max(0, resident.woodStock * 0.90);
-        resident.metalStock = max(0, resident.metalStock * 0.95);
-        resident.oilStock = 0.0;
+        // 住民が保有する資源の減価処理を動的に適用
+        double woodDep = rules.residentDepreciationRates['Wood'] ?? 0.10;
+        double metalDep = rules.residentDepreciationRates['Metal'] ?? 0.05;
+        double oilDep = rules.residentDepreciationRates['Oil'] ?? 1.0;
+
+        resident.woodStock = max(0.0, resident.woodStock * (1.0 - woodDep));
+        resident.metalStock = max(0.0, resident.metalStock * (1.0 - metalDep));
+        resident.oilStock = max(0.0, resident.oilStock * (1.0 - oilDep));
       }
     }
 
     // --- 2. 国際オークション（ゼロサム・トレード） ---
+    // 文明レベルの閾値を先に取得
+    var settingsBox = Hive.box('settings');
+    double woodThreshold = settingsBox.get(
+      'civWoodThreshold',
+      defaultValue: 20.0,
+    );
+    double metalThreshold = settingsBox.get(
+      'civMetalThreshold',
+      defaultValue: 30.0,
+    );
+
     List<String> resTypes = ['Food', 'Wood', 'Metal', 'Oil'];
     for (String rType in resTypes) {
       await _yieldCpu();
@@ -275,15 +291,43 @@ class SimulationEngine extends ChangeNotifier {
         for (var resident in buyerC.residents) {
           await _yieldCpu();
 
-          double requiredAmount = requiredResourceAmounts[rType] ?? 10.0;
+          // 資源の要求量を設定モデルから取得
+          double requiredAmount = rules.annualConsumption[rType] ?? 10.0;
 
-          String desiredRes = 'Wood';
-          if (resident.civilizationLevel == 2)
-            desiredRes = 'Metal';
-          else if (resident.civilizationLevel == 3)
-            desiredRes = 'Oil';
+          // 文明レベルと劣化速度を考慮した複数並行購入のロジック
+          bool wantsToBuy = false;
 
-          if (rType == 'Food' || rType == desiredRes) {
+          if (rType == 'Food') {
+            wantsToBuy = true;
+          } else if (rType == 'Wood') {
+            if (resident.civilizationLevel == 1) {
+              wantsToBuy = true; // レベル2を目指すために購入
+            } else if (resident.civilizationLevel >= 2) {
+              double depRate = rules.residentDepreciationRates['Wood'] ?? 0.30;
+              double nextYearStock = resident.woodStock * (1.0 - depRate);
+              // 消滅を考慮し、来年閾値を割り込む危険がある場合のみ維持のために購入
+              if (nextYearStock <= woodThreshold) {
+                wantsToBuy = true;
+              }
+            }
+          } else if (rType == 'Metal') {
+            if (resident.civilizationLevel == 2) {
+              wantsToBuy = true; // レベル3を目指すために購入
+            } else if (resident.civilizationLevel >= 3) {
+              double depRate = rules.residentDepreciationRates['Metal'] ?? 0.40;
+              double nextYearStock = resident.metalStock * (1.0 - depRate);
+              // 消滅を考慮し、来年閾値を割り込む危険がある場合のみ維持のために購入
+              if (nextYearStock <= metalThreshold) {
+                wantsToBuy = true;
+              }
+            }
+          } else if (rType == 'Oil') {
+            if (resident.civilizationLevel >= 3) {
+              wantsToBuy = true; // オイルは消費し続けるため購入
+            }
+          }
+
+          if (wantsToBuy) {
             if (rType != 'Food' && resident.weight < 50.0) {
               resident.lastYearActivities.add(
                 "Skipped bidding for $rType due to starvation (Weight: ${resident.weight.toStringAsFixed(1)}kg).",
@@ -375,10 +419,10 @@ class SimulationEngine extends ChangeNotifier {
 
         var res = sellerC.resources[rType]!;
 
-        double reqAmt = requiredResourceAmounts[rType] ?? 10.0;
+        // 落札・消費される量を設定モデルから取得
+        double reqAmt = rules.annualConsumption[rType] ?? 10.0;
         int maxWinners = (res.availableAmount / reqAmt).floor();
 
-        // ★修正: Claudeの指摘を反映し、クリアリング価格の計算バグを修正
         double clearingPriceS = res.lastMarketPrice;
         if (bids.isNotEmpty) {
           if (bids.length > maxWinners && maxWinners > 0) {
@@ -547,7 +591,6 @@ class SimulationEngine extends ChangeNotifier {
 
             int maxWinners2 = (res.availableAmount / reqAmt).floor();
 
-            // ★修正: 第2ラウンドでも同様に独占高値バグを防ぐ
             if (round2Bids.length > maxWinners2 && maxWinners2 > 0) {
               clearingPriceS2 = max(1.0, round2Bids[maxWinners2 - 1]['wtpS']);
             } else {
@@ -686,7 +729,6 @@ class SimulationEngine extends ChangeNotifier {
       hwiScores.sort();
       double totalHwiSum = hwiScores.fold(0.0, (a, b) => a + b);
 
-      // ★追加: 今年のHWIの平均値を計算
       double avgHwi = hwiScores.isNotEmpty
           ? totalHwiSum / hwiScores.length
           : 0.0;
@@ -703,6 +745,7 @@ class SimulationEngine extends ChangeNotifier {
         gini = min(1.0, max(0.0, gini));
       }
 
+      // ★追加: ターン終了時の各資源の市場在庫量を記録
       c.history.add(
         YearlyMetrics(
           year: currentYear,
@@ -720,7 +763,10 @@ class SimulationEngine extends ChangeNotifier {
           netTradeBalance: netTradeBal,
           grossTradeVolume: grossTradeVol,
           giniIndex: gini,
-          avgHwi: avgHwi, // ★追加
+          avgHwi: avgHwi,
+          woodInventory: c.resources['Wood']?.availableAmount ?? 0.0,
+          metalInventory: c.resources['Metal']?.availableAmount ?? 0.0,
+          oilInventory: c.resources['Oil']?.availableAmount ?? 0.0,
         ),
       );
 
@@ -921,12 +967,19 @@ class SimulationEngine extends ChangeNotifier {
     });
     b.writeln('--------------------------------------');
 
+    // 出力用のリアルタイムUSDプールの取得
+    double poolUsd = exchange.liquidityPool['USD'] ?? 1.0;
+
     for (var c in countries) {
       double avgW =
           c.residents.map((e) => e.weight).reduce((a, b) => a + b) / 10;
       double avgCiv =
           c.residents.map((e) => e.civilizationLevel).reduce((a, b) => a + b) /
           10;
+
+      // コピー出力用のテキストでもリアルタイムの為替レートを計算する
+      double poolLocal = exchange.liquidityPool[c.currencyName] ?? 1.0;
+      double liveCurrencyIndex = poolLocal > 0 ? (poolUsd / poolLocal) : 0.0;
 
       b.writeln('Country: ${c.name} (${c.currencyName})');
 
@@ -939,10 +992,9 @@ class SimulationEngine extends ChangeNotifier {
         '- Avg Weight: ${avgW.toStringAsFixed(1)}kg | Avg Civ: ${avgCiv.toStringAsFixed(2)}',
       );
       b.writeln(
-        '- Currency Strength Index: ${c.currencyIndex.toStringAsFixed(4)} (vs USD)',
+        '- Currency Strength Index: ${liveCurrencyIndex.toStringAsFixed(4)} (vs USD)',
       );
 
-      // ★追加: 最新履歴のavgHwiとginiIndexを出力 (存在する場合)
       if (c.history.isNotEmpty) {
         var lastMetrics = c.history.last;
         b.writeln(
