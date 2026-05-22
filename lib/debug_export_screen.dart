@@ -52,9 +52,7 @@ class DebugExportScreen extends StatelessWidget {
 
     for (var c in engine.countries) {
       double latestGini = c.history.isNotEmpty ? c.history.last.giniIndex : 0.0;
-      double latestAvgHwi = c.history.isNotEmpty
-          ? c.history.last.avgHwi
-          : 0.0; // ★追加
+      double latestAvgHwi = c.history.isNotEmpty ? c.history.last.avgHwi : 0.0;
       double latestGrossTrade = c.history.isNotEmpty
           ? c.history.last.grossTradeVolume
           : 0.0;
@@ -72,7 +70,7 @@ class DebugExportScreen extends StatelessWidget {
       buffer.writeln('  Wealth Gini Index: ${latestGini.toStringAsFixed(4)}');
       buffer.writeln(
         '  Average HWI (Holistic Welfare): ${latestAvgHwi.toStringAsFixed(1)}',
-      ); // ★追加
+      );
 
       buffer.writeln(
         '  Gross Trade Volume (Local): ${latestGrossTrade.toStringAsFixed(2)}',
@@ -104,12 +102,34 @@ class DebugExportScreen extends StatelessWidget {
       buffer.writeln(
         '    Food Domestic Priority: ${c.foodDomesticPriority ? "ENABLED" : "DISABLED"}',
       );
-      if (c.exportBans.isEmpty) {
-        buffer.writeln('    Export Bans: None');
+
+      // 全面禁輸
+      if (c.exportBans.isEmpty || !c.exportBans.values.any((v) => v)) {
+        buffer.writeln('    Global Export Bans: None');
       } else {
-        buffer.writeln('    Export Bans:');
+        buffer.writeln('    Global Export Bans:');
         c.exportBans.forEach((k, v) {
-          buffer.writeln('      $k: ${v ? "BANNED" : "Allowed"}');
+          if (v) buffer.writeln('      $k: BANNED to ALL countries');
+        });
+      }
+
+      // ★追加: ターゲット国指定の禁輸（制裁）
+      if (c.targetedExportBans.isEmpty ||
+          !c.targetedExportBans.values.any((v) => v)) {
+        buffer.writeln('    Targeted Sanctions (Embargos): None');
+      } else {
+        buffer.writeln('    Targeted Sanctions (Embargos):');
+        c.targetedExportBans.forEach((k, v) {
+          if (v) {
+            var parts = k.split(
+              ':',
+            ); // parts[0] = targetCountryId, parts[1] = resourceType
+            if (parts.length == 2) {
+              buffer.writeln(
+                '      ${parts[1]} is BANNED against Target Country ID: ${parts[0]}',
+              );
+            }
+          }
         });
       }
 

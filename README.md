@@ -103,15 +103,15 @@ Where X and Y are the liquidity pool sizes of the two currencies being swapped, 
 
 Each resident's welfare is scored as:
 
-```
-HWI = StockScore + HealthScore + FinancialScore
+HWI = AssetScore + HealthScore + FinancialScore
 
-StockScore    = (woodStock × 20) + (metalStock × 50) + (oilStock × 100)
-HealthScore   = max(0, (weight − 50) × 100)
-FinancialScore = 1000 × log₂(1 + max(0, financialWealth / avgFinancialWealth))
-```
+AssetScore     = (woodStock × Weight_W) + (metalStock × Weight_M) + (oilStock × Weight_O)
+Weight_R       = (TotalGlobalDemand / GlobalSupply) × (100 / AnnualConsumption_R) × 4.0
+HealthScore    = max(0, (weight − 50) × 100)
+FinancialScore = 1000 × log₂(1 + max(0, residentWealth / avgNationalWealth))
 
-HWI is used for Gini index calculation and progressive UBI weighting. In progressive mode, each resident's UBI share is proportional to `1 / max(1, HWI)`, redistributing toward the least wealthy.
+* **Weight_R:** The weight of each resource is dynamic. Resources that are rarer or represent a higher proportion of global consumption carry significantly more weight.
+* **HWI Usage:** HWI is used for Gini index calculation and progressive UBI weighting. In progressive mode, each resident's UBI share is proportional to `1 / max(1, HWI)`, redistributing wealth toward the least wealthy.
 
 ---
 
@@ -139,6 +139,16 @@ This project is licensed under the MIT License - see the source files for detail
 ---
 
 ## 🔄 Changelog
+
+### v1.0.4
+- **Supply Chain Degradation:** Introduced resource quality debuffs in the multi-round auction system. Procuring resources in later bidding rounds now yields reduced effective quantities (e.g., 85% in Round 2, 70% in Round 3), simulating the harsh realities of secondary markets and economic sanctions.
+- **Gradual Starvation Model:** Overhauled the resident weight management logic. Weight gain/loss is now calculated continuously using linear interpolation based on the food fulfillment ratio, allowing for highly realistic simulations of chronic malnutrition and gradual physical decline.
+
+### v1.0.3
+- **⚠️ Important Notice:** Due to major structural changes in the simulation engine and data models, this version is not compatible with save data from v1.0.2 or earlier. Please perform a fresh installation or clear your local app data after updating to avoid potential crashes.
+- **Targeted Sanctions:** Added the ability to impose item-specific export embargos on specific countries to simulate geopolitical trade policies.
+- **Multi-Round Trade Engine:** Implemented a multi-round bidding system (up to 4 rounds for Food, 3 for others) to enable spatial arbitrage and reduce market volatility.
+- **Dynamic Macroeconomic Weighting:** Asset valuation in HWI is now dynamic based on supply, demand, and scarcity.
 
 ### v1.0.2
 - App Store Release.

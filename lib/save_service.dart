@@ -100,6 +100,7 @@ class SaveService {
         'tariffs': c.tariffs,
         'inheritanceTaxRate': c.inheritanceTaxRate,
         'exportBans': c.exportBans,
+        'targetedExportBans': c.targetedExportBans, // ★追加: ターゲット国指定の輸出禁止
         'foodDomesticPriority': c.foodDomesticPriority,
         'ubiPayoutRatio': c.ubiPayoutRatio,
         'useProgressiveUbi': c.useProgressiveUbi,
@@ -138,7 +139,6 @@ class SaveService {
                 'grossTradeVolume': h.grossTradeVolume,
                 'giniIndex': h.giniIndex,
                 'avgHwi': h.avgHwi,
-                // ★追加: 各資源の市場在庫量
                 'woodInventory': h.woodInventory,
                 'metalInventory': h.metalInventory,
                 'oilInventory': h.oilInventory,
@@ -294,7 +294,6 @@ class SaveService {
               grossTradeVolume: (h['grossTradeVolume'] as num).toDouble(),
               giniIndex: (h['giniIndex'] as num).toDouble(),
               avgHwi: (h['avgHwi'] as num).toDouble(),
-              // ★追加: 各資源の市場在庫量
               woodInventory: (h['woodInventory'] as num).toDouble(),
               metalInventory: (h['metalInventory'] as num).toDouble(),
               oilInventory: (h['oilInventory'] as num).toDouble(),
@@ -327,6 +326,9 @@ class SaveService {
         ),
         inheritanceTaxRate: (cMap['inheritanceTaxRate'] as num).toDouble(),
         exportBans: Map<String, bool>.from(cMap['exportBans']),
+        targetedExportBans: Map<String, bool>.from(
+          cMap['targetedExportBans'],
+        ), // ★追加: ターゲット国指定の輸出禁止の復元
         foodDomesticPriority: cMap['foodDomesticPriority'] as bool,
         ubiPayoutRatio: (cMap['ubiPayoutRatio'] as num).toDouble(),
         useProgressiveUbi: cMap['useProgressiveUbi'] as bool,

@@ -40,11 +40,17 @@ class Country extends HiveObject {
   String id;
   String name;
   String currencyName;
+
+  // 関税設定 (キー: '相手国ID:品目名', 値: 税率)
   Map<String, double> tariffs;
+
   double inheritanceTaxRate;
 
-  // 各品目の輸出禁止措置（キー: 品目名, 値: trueなら禁止）
+  // 各品目の全面輸出禁止措置（キー: 品目名, 値: trueなら全世界へ禁止）
   Map<String, bool> exportBans;
+
+  // ★追加: 特定国向けの輸出禁止措置（キー: '相手国ID:品目名', 値: trueならその国へ禁止）
+  Map<String, bool> targetedExportBans;
 
   // 食料の自国民優先フラグ（trueならオークション時に自国民の落札を最優先する）
   bool foodDomesticPriority;
@@ -71,6 +77,7 @@ class Country extends HiveObject {
     required this.tariffs,
     required this.inheritanceTaxRate,
     Map<String, bool>? exportBans,
+    Map<String, bool>? targetedExportBans, // ★追加
     this.foodDomesticPriority = false,
     this.ubiPayoutRatio = 1.0,
     this.useProgressiveUbi = false,
@@ -82,6 +89,7 @@ class Country extends HiveObject {
     Map<String, double>? importLedger,
     List<YearlyMetrics>? history,
   }) : exportBans = exportBans ?? {},
+       targetedExportBans = targetedExportBans ?? {}, // ★追加
        reserves = reserves ?? {},
        exportLedger = exportLedger ?? {},
        importLedger = importLedger ?? {},
@@ -179,7 +187,7 @@ class YearlyMetrics extends HiveObject {
   // 総合幸福度指数 (Holistic Welfare Index) の平均値
   double avgHwi;
 
-  // ★追加: 各資源の市場在庫量（余剰量）
+  // 各資源の市場在庫量（余剰量）
   double woodInventory;
   double metalInventory;
   double oilInventory;
@@ -237,6 +245,7 @@ class CountryAdapter extends TypeAdapter<Country> {
       importLedger: Map<String, double>.from(reader.readMap()),
       history: List<YearlyMetrics>.from(reader.readList()),
       exportBans: Map<String, bool>.from(reader.readMap()),
+      targetedExportBans: Map<String, bool>.from(reader.readMap()), // ★追加
       foodDomesticPriority: reader.readBool(),
       ubiPayoutRatio: reader.readDouble(),
       useProgressiveUbi: reader.readBool(),
@@ -258,6 +267,7 @@ class CountryAdapter extends TypeAdapter<Country> {
     writer.writeMap(obj.importLedger);
     writer.writeList(obj.history);
     writer.writeMap(obj.exportBans);
+    writer.writeMap(obj.targetedExportBans); // ★追加
     writer.writeBool(obj.foodDomesticPriority);
     writer.writeDouble(obj.ubiPayoutRatio);
     writer.writeBool(obj.useProgressiveUbi);
@@ -352,7 +362,6 @@ class YearlyMetricsAdapter extends TypeAdapter<YearlyMetrics> {
     grossTradeVolume: reader.readDouble(),
     giniIndex: reader.readDouble(),
     avgHwi: reader.readDouble(),
-    // ★追加分を読み込む
     woodInventory: reader.readDouble(),
     metalInventory: reader.readDouble(),
     oilInventory: reader.readDouble(),
@@ -375,7 +384,6 @@ class YearlyMetricsAdapter extends TypeAdapter<YearlyMetrics> {
     writer.writeDouble(obj.grossTradeVolume);
     writer.writeDouble(obj.giniIndex);
     writer.writeDouble(obj.avgHwi);
-    // ★追加分を書き込む
     writer.writeDouble(obj.woodInventory);
     writer.writeDouble(obj.metalInventory);
     writer.writeDouble(obj.oilInventory);

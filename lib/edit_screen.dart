@@ -397,24 +397,31 @@ class _EditScreenState extends State<EditScreen> {
         return StatefulBuilder(
           builder: (context, setDialogState) {
             return AlertDialog(
-              title: Text('Export Bans in ${c.name}'),
+              title: Text('Global Export Bans in ${c.name}'),
               content: Column(
                 mainAxisSize: MainAxisSize.min,
-                children: resTypes.map((resType) {
-                  return SwitchListTile(
-                    title: Text(
-                      'Ban $resType Export',
-                      style: const TextStyle(fontWeight: FontWeight.bold),
-                    ),
-                    activeColor: Colors.redAccent,
-                    value: tempBans[resType] ?? false,
-                    onChanged: (val) {
-                      setDialogState(() {
-                        tempBans[resType] = val;
-                      });
-                    },
-                  );
-                }).toList(),
+                children: [
+                  const Text(
+                    'Ban exports of specific resources to ALL foreign countries entirely.',
+                    style: TextStyle(color: Colors.white70, fontSize: 13),
+                  ),
+                  const SizedBox(height: 12),
+                  ...resTypes.map((resType) {
+                    return SwitchListTile(
+                      title: Text(
+                        'Ban $resType Export',
+                        style: const TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                      activeColor: Colors.redAccent,
+                      value: tempBans[resType] ?? false,
+                      onChanged: (val) {
+                        setDialogState(() {
+                          tempBans[resType] = val;
+                        });
+                      },
+                    );
+                  }).toList(),
+                ],
               ),
               actions: [
                 TextButton(
@@ -436,7 +443,118 @@ class _EditScreenState extends State<EditScreen> {
                     if (changed) engine.notifyListeners();
                     Navigator.pop(ctx);
                     ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text('Export Bans updated!')),
+                      const SnackBar(
+                        content: Text('Global Export Bans updated!'),
+                      ),
+                    );
+                  },
+                  child: const Text('Confirm & Apply'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  // ★新規追加: 特定国向け輸出禁止（経済制裁）ダイアログ
+  void _showTargetedSanctionsDialog(
+    BuildContext context,
+    SimulationEngine engine,
+    Country from,
+  ) {
+    Map<String, bool> tempBans = Map.from(from.targetedExportBans);
+    List<String> resTypes = ['Food', 'Wood', 'Metal', 'Oil'];
+
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: Text('Targeted Sanctions by ${from.name}'),
+              content: SizedBox(
+                width: double.maxFinite,
+                child: ListView(
+                  shrinkWrap: true,
+                  children: [
+                    const Padding(
+                      padding: EdgeInsets.only(bottom: 12.0),
+                      child: Text(
+                        'Selectively embargo specific resources to specific target countries.',
+                        style: TextStyle(color: Colors.white70, fontSize: 13),
+                      ),
+                    ),
+                    ...engine.countries.where((c) => c.id != from.id).map((to) {
+                      return Card(
+                        color: Colors.blueGrey[800],
+                        child: ExpansionTile(
+                          title: Text(
+                            'Embargo against ${to.name}',
+                            style: const TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                          children: resTypes.map((resType) {
+                            String key = '${to.id}:$resType';
+                            return SwitchListTile(
+                              title: Text(
+                                'Ban $resType Export',
+                                style: TextStyle(
+                                  color: (tempBans[key] ?? false)
+                                      ? Colors.redAccent
+                                      : Colors.white,
+                                ),
+                              ),
+                              activeColor: Colors.redAccent,
+                              value: tempBans[key] ?? false,
+                              onChanged: (val) {
+                                setDialogState(() {
+                                  tempBans[key] = val;
+                                });
+                              },
+                            );
+                          }).toList(),
+                        ),
+                      );
+                    }).toList(),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const Text('Cancel'),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.red[900],
+                  ),
+                  onPressed: () {
+                    bool changed = false;
+                    tempBans.forEach((key, isBanned) {
+                      if ((from.targetedExportBans[key] ?? false) != isBanned) {
+                        var parts = key.split(':');
+                        if (parts.length == 2) {
+                          Country targetC = engine.countries.firstWhere(
+                            (c) => c.id == parts[0],
+                          );
+                          engine.updateTargetedExportBan(
+                            from,
+                            targetC,
+                            parts[1],
+                            isBanned,
+                          );
+                          changed = true;
+                        }
+                      }
+                    });
+
+                    if (changed) engine.notifyListeners();
+                    Navigator.pop(ctx);
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                        content: Text('Targeted Sanctions officially enacted!'),
+                      ),
                     );
                   },
                   child: const Text('Confirm & Apply'),
@@ -1043,11 +1161,24 @@ class _EditScreenState extends State<EditScreen> {
                     ),
                     ElevatedButton.icon(
                       icon: const Icon(Icons.block),
-                      label: const Text('Export Bans'),
+                      label: const Text('Global Export Bans'),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: Colors.red[900],
                       ),
                       onPressed: () => _showExportBanDialog(
+                        context,
+                        engine,
+                        _selectedCountry!,
+                      ),
+                    ),
+                    // ★新規追加: 特定国向け禁輸（制裁）ボタン
+                    ElevatedButton.icon(
+                      icon: const Icon(Icons.gavel),
+                      label: const Text('Targeted Sanctions'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.deepPurple[900],
+                      ),
+                      onPressed: () => _showTargetedSanctionsDialog(
                         context,
                         engine,
                         _selectedCountry!,

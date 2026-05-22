@@ -11,6 +11,22 @@ class SimulationEngine extends ChangeNotifier {
   final Stopwatch _coolDownTimer = Stopwatch();
   final int ecoWaitMs = 100;
 
+  // =================================================================
+  // 【バランス調整用】 デバフ＆体重増減の定数設定エリア
+  // =================================================================
+
+  // ラウンドごとの取得量デバフ（Quality Multiplier）
+  // インデックス番号がラウンド数に一致します（インデックス0は不使用）。
+  // 例: 第1R=100%, 第2R=85%, 第3R=70%, 第4R(自国救済)=65%
+  //最初の1.0はダミーなので、第1Rは2個目の1.0なので注意
+  final List<double> roundQualityMultipliers = [1.0, 1.0, 0.85, 0.7, 0.65];
+
+  // 食料充足率（Ratio）に基づく体重増減（線形補間）の定数
+  final double foodWeightLossMax = 5.0; // Ratio 0.0 (絶食時) の減少量
+  final double foodWeightGainMax = 2.0; // Ratio 1.0 (満腹時) の増加量
+
+  // =================================================================
+
   SimulationEngine() {
     var settings = Hive.box('settings');
     if (settings.containsKey('currentYear')) {
@@ -27,7 +43,7 @@ class SimulationEngine extends ChangeNotifier {
   // グローバルなシミュレーション設定を読み込むゲッター
   SimulationSettings get simRules {
     var box = Hive.box('settings');
-    return box.get('sim_rules') ?? SimulationSettings(); // 設定がない場合はデフォルト値を返す
+    return box.get('sim_rules') ?? SimulationSettings();
   }
 
   List<Country> get countries => Hive.box<Country>('countries').values.toList();
@@ -90,14 +106,70 @@ class SimulationEngine extends ChangeNotifier {
 
     final allCountries = countries;
     GlobalExchange exchange = globalExchange;
-
-    // 今年の計算に使用するルール（年間消費量、消滅率）を取得
     SimulationSettings rules = simRules;
 
-    // 実質貿易量（ポイント）を記録するマップの初期化
     Map<String, double> realGrossTradeVolumes = {
       for (var c in allCountries) c.id: 0.0,
     };
+
+    // =================================================================
+    // 動的HWIウェイト（重み）の事前計算
+    // =================================================================
+    int totalPopulation = allCountries.fold(
+      0,
+      (sum, c) => sum + c.residents.length,
+    );
+
+    Map<String, double> globalDemand = {
+      'Wood':
+          (rules.annualConsumption['Wood'] ?? 6.0) * max(1, totalPopulation),
+      'Metal':
+          (rules.annualConsumption['Metal'] ?? 5.0) * max(1, totalPopulation),
+      'Oil': (rules.annualConsumption['Oil'] ?? 1.5) * max(1, totalPopulation),
+    };
+
+    Map<String, double> globalSupply = {'Wood': 0.0, 'Metal': 0.0, 'Oil': 0.0};
+    for (var c in allCountries) {
+      globalSupply['Wood'] =
+          globalSupply['Wood']! +
+          (c.resources['Wood']?.availableAmount ?? 0.0) +
+          (c.resources['Wood']?.annualProduction ?? 0.0);
+      globalSupply['Metal'] =
+          globalSupply['Metal']! +
+          (c.resources['Metal']?.availableAmount ?? 0.0) +
+          (c.resources['Metal']?.annualProduction ?? 0.0);
+      globalSupply['Oil'] =
+          globalSupply['Oil']! +
+          (c.resources['Oil']?.availableAmount ?? 0.0) +
+          (c.resources['Oil']?.annualProduction ?? 0.0);
+      for (var r in c.residents) {
+        globalSupply['Wood'] = globalSupply['Wood']! + r.woodStock;
+        globalSupply['Metal'] = globalSupply['Metal']! + r.metalStock;
+        globalSupply['Oil'] = globalSupply['Oil']! + r.oilStock;
+      }
+    }
+
+    double totalAnnualConsumption =
+        (rules.annualConsumption['Food'] ?? 12.0) +
+        (rules.annualConsumption['Wood'] ?? 6.0) +
+        (rules.annualConsumption['Metal'] ?? 5.0) +
+        (rules.annualConsumption['Oil'] ?? 1.5);
+
+    double assetScoreMultiplier = 10.0;
+
+    double getDynamicWeight(String rType) {
+      double demand = globalDemand[rType]!;
+      double supply = max(1.0, globalSupply[rType]!);
+      double scarcityRatio = (demand / supply).clamp(0.2, 5.0);
+      double shareInverse =
+          totalAnnualConsumption /
+          max(0.1, rules.annualConsumption[rType] ?? 1.0);
+      return shareInverse * scarcityRatio * assetScoreMultiplier;
+    }
+
+    double dynWoodWeight = getDynamicWeight('Wood');
+    double dynMetalWeight = getDynamicWeight('Metal');
+    double dynOilWeight = getDynamicWeight('Oil');
 
     // --- 1. 資源の算出と住民の加齢・UBI分配 ---
     for (var c in allCountries) {
@@ -106,10 +178,7 @@ class SimulationEngine extends ChangeNotifier {
 
       for (var entry in c.resources.entries) {
         await _yieldCpu();
-
-        // 国家（市場）が保有する資源の減価処理を動的に適用
         double depRate = rules.countryDepreciationRates[entry.key] ?? 0.0;
-        // 現在の在庫から消滅率分を減らし、そこに今年の生産量を足す
         entry.value.availableAmount =
             max(0.0, entry.value.availableAmount * (1.0 - depRate)) +
             entry.value.annualProduction;
@@ -119,11 +188,9 @@ class SimulationEngine extends ChangeNotifier {
         await _yieldCpu();
         resident.lastYearActivities.clear();
         resident.previousWeight = resident.weight;
-
         resident.age += 1;
-        // 餓死判定を削除し、純粋な寿命(10歳)のみで転生
+
         if (resident.age >= 10) {
-          // 没収分は金庫へ行き、自国通貨はUBI原資となる
           double totalTaxPaid = 0.0;
           for (var cur in resident.wallet.keys.toList()) {
             double amt = resident.wallet[cur]! * c.inheritanceTaxRate;
@@ -132,25 +199,19 @@ class SimulationEngine extends ChangeNotifier {
             totalTaxPaid += amt;
           }
 
-          // --- 2. 実物資産の相続税処理 ---
           double safeTaxRate = max(0.0, min(1.0, c.inheritanceTaxRate));
-          double inheritRatio = 1.0 - safeTaxRate; // 子孫が引き継げる割合
-          double taxRatio = safeTaxRate; // 政府が没収する割合
+          double inheritRatio = 1.0 - safeTaxRate;
+          double taxRatio = safeTaxRate;
 
-          // 没収された資源は、国内の市場在庫（公売）に還元される
-          if (c.resources.containsKey('Wood')) {
+          if (c.resources.containsKey('Wood'))
             c.resources['Wood']!.availableAmount +=
                 resident.woodStock * taxRatio;
-          }
-          if (c.resources.containsKey('Metal')) {
+          if (c.resources.containsKey('Metal'))
             c.resources['Metal']!.availableAmount +=
                 resident.metalStock * taxRatio;
-          }
-          if (c.resources.containsKey('Oil')) {
+          if (c.resources.containsKey('Oil'))
             c.resources['Oil']!.availableAmount += resident.oilStock * taxRatio;
-          }
 
-          // 残りは0歳の自分にそのまま引き継ぐ（フェイルセーフでマイナス防止）
           resident.woodStock = max(0.0, resident.woodStock * inheritRatio);
           resident.metalStock = max(0.0, resident.metalStock * inheritRatio);
           resident.oilStock = max(0.0, resident.oilStock * inheritRatio);
@@ -165,11 +226,7 @@ class SimulationEngine extends ChangeNotifier {
         }
       }
 
-      // =================================================================
-      // UBI（分配金）の計算と傾斜配分のための事前HWI算出
-      // =================================================================
-
-      // 1. 分配前の平均金融資産を算出
+      // UBI事前計算
       List<double> preUbiFinancialWealths = [];
       for (var r in c.residents) {
         double w = 0.0;
@@ -185,13 +242,14 @@ class SimulationEngine extends ChangeNotifier {
           preUbiFinancialWealths.fold(0.0, (a, b) => a + b) /
           max(1, c.residents.length);
 
-      // 2. 分配前のHWI算出し、傾斜配分用の逆数合計を求める
       List<double> preUbiHwi = [];
       double totalInverseHwi = 0.0;
       for (int i = 0; i < c.residents.length; i++) {
         Resident r = c.residents[i];
         double stockScore =
-            (r.woodStock * 20.0) + (r.metalStock * 50.0) + (r.oilStock * 100.0);
+            (r.woodStock * dynWoodWeight) +
+            (r.metalStock * dynMetalWeight) +
+            (r.oilStock * dynOilWeight);
         double healthScore = max(0.0, (r.weight - 50.0) * 100.0);
         double ratio = preUbiAvgFinWealth > 0.0
             ? (preUbiFinancialWealths[i] / preUbiAvgFinWealth)
@@ -200,38 +258,30 @@ class SimulationEngine extends ChangeNotifier {
 
         double hwi = max(0.0, stockScore + healthScore + finScore);
         preUbiHwi.add(hwi);
-
-        if (c.useProgressiveUbi) {
-          totalInverseHwi += 1.0 / max(1.0, hwi);
-        }
+        if (c.useProgressiveUbi) totalInverseHwi += 1.0 / max(1.0, hwi);
       }
 
-      // 3. 政府準備高から、Payout Ratio に応じて分配用プールを抽出
       Map<String, double> ubiPool = {};
       double safePayoutRatio = max(0.0, min(1.0, c.ubiPayoutRatio));
-
-      // UBIで国民に配るのは「自国通貨」のみに限定（外貨準備はプールに温存）
       String localCur = c.currencyName;
       double amount = c.reserves[localCur] ?? 0.0;
       double payoutAmount = amount * safePayoutRatio;
       if (payoutAmount > 0) {
         ubiPool[localCur] = payoutAmount;
-        c.reserves[localCur] = amount - payoutAmount; // 残りを政府にプール
+        c.reserves[localCur] = amount - payoutAmount;
       }
 
-      // 4. 各住民への実際の配布
       for (int i = 0; i < c.residents.length; i++) {
         await _yieldCpu();
         Resident resident = c.residents[i];
         List<String> receivedUbi = [];
 
-        // 配分シェアの決定
         double shareRatio = 0.0;
         if (c.residents.isNotEmpty) {
           if (c.useProgressiveUbi && totalInverseHwi > 0.0) {
             shareRatio = (1.0 / max(1.0, preUbiHwi[i])) / totalInverseHwi;
           } else {
-            shareRatio = 1.0 / c.residents.length; // 均等配分（フラット）
+            shareRatio = 1.0 / c.residents.length;
           }
         }
 
@@ -250,7 +300,6 @@ class SimulationEngine extends ChangeNotifier {
           );
         }
 
-        // 住民が保有する資源の減価処理を動的に適用
         double woodDep = rules.residentDepreciationRates['Wood'] ?? 0.10;
         double metalDep = rules.residentDepreciationRates['Metal'] ?? 0.05;
         double oilDep = rules.residentDepreciationRates['Oil'] ?? 1.0;
@@ -261,8 +310,7 @@ class SimulationEngine extends ChangeNotifier {
       }
     }
 
-    // --- 2. 国際オークション（ゼロサム・トレード） ---
-    // 文明レベルの閾値を先に取得
+    // --- 2. 国際オークション（最大4ラウンド制） ---
     var settingsBox = Hive.box('settings');
     double woodThreshold = settingsBox.get(
       'civWoodThreshold',
@@ -276,381 +324,395 @@ class SimulationEngine extends ChangeNotifier {
     List<String> resTypes = ['Food', 'Wood', 'Metal', 'Oil'];
     for (String rType in resTypes) {
       await _yieldCpu();
-      Map<String, List<Map<String, dynamic>>> marketBids = {
-        for (var c in allCountries) c.id: [],
+
+      Set<Resident> securedResidents = {};
+      Map<Resident, Set<String>> visitedCountries = {};
+
+      // 食料の充足率を管理するマップ（柔軟な体重増減用）
+      Map<Resident, double> foodObtainedRatios = {};
+
+      Map<String, double> latestClearingPrices = {
+        for (var c in allCountries) c.id: c.resources[rType]!.lastMarketPrice,
+      };
+      Map<String, int> totalBiddersAcrossRounds = {
+        for (var c in allCountries) c.id: 0,
       };
 
-      // その資源を確保できた住民を追跡（食糧の2回目入札判定用）
-      Set<Resident> securedResidents = {};
+      // 食料のみ自国救済用の4ラウンド目を設ける
+      int maxRounds = (rType == 'Food') ? 4 : 3;
 
-      // 買手ごとのWTP（支払意志額）の算出
-      for (var buyerC in allCountries) {
-        String buyerLocal = buyerC.currencyName;
-        double poolIn = exchange.liquidityPool[buyerLocal] ?? 1.0;
+      for (int round = 1; round <= maxRounds; round++) {
+        await _yieldCpu();
+        Map<String, List<Map<String, dynamic>>> marketBids = {
+          for (var c in allCountries) c.id: [],
+        };
 
-        for (var resident in buyerC.residents) {
-          await _yieldCpu();
+        // 当ラウンドの品質デバフ倍率を取得
+        double qualityMultiplier = roundQualityMultipliers[round];
 
-          // 資源の要求量を設定モデルから取得
-          double requiredAmount = rules.annualConsumption[rType] ?? 10.0;
+        // --- 買手側の入札先決定 ---
+        for (var buyerC in allCountries) {
+          String buyerLocal = buyerC.currencyName;
+          double poolIn = exchange.liquidityPool[buyerLocal] ?? 1.0;
 
-          // 文明レベルと劣化速度を考慮した複数並行購入のロジック
-          bool wantsToBuy = false;
+          for (var resident in buyerC.residents) {
+            await _yieldCpu();
+            if (securedResidents.contains(resident)) continue;
 
-          if (rType == 'Food') {
-            wantsToBuy = true;
-          } else if (rType == 'Wood') {
-            if (resident.civilizationLevel == 1) {
-              wantsToBuy = true; // レベル2を目指すために購入
-            } else if (resident.civilizationLevel >= 2) {
-              double depRate = rules.residentDepreciationRates['Wood'] ?? 0.30;
-              double nextYearStock = resident.woodStock * (1.0 - depRate);
-              // 消滅を考慮し、来年閾値を割り込む危険がある場合のみ維持のために購入
-              if (nextYearStock <= woodThreshold) {
+            double requiredAmount = rules.annualConsumption[rType] ?? 10.0;
+            bool wantsToBuy = false;
+
+            if (rType == 'Food') {
+              wantsToBuy = true;
+            } else if (rType == 'Wood') {
+              if (resident.civilizationLevel == 1) {
                 wantsToBuy = true;
+              } else if (resident.civilizationLevel >= 2) {
+                double depRate =
+                    rules.residentDepreciationRates['Wood'] ?? 0.30;
+                if ((resident.woodStock * (1.0 - depRate)) <= woodThreshold)
+                  wantsToBuy = true;
               }
-            }
-          } else if (rType == 'Metal') {
-            if (resident.civilizationLevel == 2) {
-              wantsToBuy = true; // レベル3を目指すために購入
-            } else if (resident.civilizationLevel >= 3) {
-              double depRate = rules.residentDepreciationRates['Metal'] ?? 0.40;
-              double nextYearStock = resident.metalStock * (1.0 - depRate);
-              // 消滅を考慮し、来年閾値を割り込む危険がある場合のみ維持のために購入
-              if (nextYearStock <= metalThreshold) {
+            } else if (rType == 'Metal') {
+              if (resident.civilizationLevel == 2) {
                 wantsToBuy = true;
+              } else if (resident.civilizationLevel >= 3) {
+                double depRate =
+                    rules.residentDepreciationRates['Metal'] ?? 0.40;
+                if ((resident.metalStock * (1.0 - depRate)) <= metalThreshold)
+                  wantsToBuy = true;
               }
+            } else if (rType == 'Oil') {
+              if (resident.civilizationLevel >= 3) wantsToBuy = true;
             }
-          } else if (rType == 'Oil') {
-            if (resident.civilizationLevel >= 3) {
-              wantsToBuy = true; // オイルは消費し続けるため購入
-            }
-          }
 
-          if (wantsToBuy) {
+            if (!wantsToBuy) continue;
+
+            visitedCountries.putIfAbsent(resident, () => {});
+
+            // 餓死寸前での非食料入札スキップ判定 (ログ重複を避けるため初回のみ記録)
             if (rType != 'Food' && resident.weight < 50.0) {
-              resident.lastYearActivities.add(
-                "Skipped bidding for $rType due to starvation (Weight: ${resident.weight.toStringAsFixed(1)}kg).",
-              );
+              if (visitedCountries[resident]!.isEmpty) {
+                resident.lastYearActivities.add(
+                  "Too frail to care about $rType (Weight: ${resident.weight.toStringAsFixed(1)}kg). Survival comes first.",
+                );
+                visitedCountries[resident]!.add('STARVING');
+              }
               continue;
             }
 
-            Country? bestSeller;
-            double bestEstCost = double.infinity;
+            if (round == 4 && rType == 'Food') {
+              // ラウンド4: 自国市場への泣きつき（国内在庫がある場合のみ）
+              if (!visitedCountries[resident]!.contains(buyerC.id)) {
+                double localAvailable =
+                    buyerC.resources[rType]!.availableAmount;
+                if (localAvailable >= requiredAmount) {
+                  double tariff = buyerC.tariffs['${buyerC.id}:$rType'] ?? 0.0;
+                  double localBudget = resident.wallet[buyerLocal] ?? 0.0;
+                  double wtpS = localBudget / (1 + tariff);
 
-            var shuffledSellers = allCountries.toList()..shuffle(Random());
-            for (var sellerC in shuffledSellers) {
-              if (sellerC.resources[rType]!.availableAmount < requiredAmount)
-                continue;
+                  visitedCountries[resident]!.add(buyerC.id);
+                  marketBids[buyerC.id]!.add({
+                    'resident': resident,
+                    'buyerC': buyerC,
+                    'wtpS': wtpS,
+                    'amount': requiredAmount,
+                    'rand': Random().nextDouble(),
+                  });
+                }
+              }
+            } else if (round <= 3) {
+              // ラウンド1-3: 未訪問の国から最も安く買えそうな場所を探す
+              Country? bestSeller;
+              double bestEstCost = double.infinity;
 
-              if (buyerC.id != sellerC.id &&
-                  (sellerC.exportBans[rType] ?? false)) {
-                continue;
+              var shuffledSellers = allCountries.toList()..shuffle(Random());
+              for (var sellerC in shuffledSellers) {
+                if (visitedCountries[resident]!.contains(sellerC.id)) continue;
+                if (sellerC.resources[rType]!.availableAmount < requiredAmount)
+                  continue;
+
+                // 全面禁輸、またはターゲット国指定の禁輸に引っかかる場合はスキップ
+                if (buyerC.id != sellerC.id &&
+                    ((sellerC.exportBans[rType] ?? false) ||
+                        (sellerC.targetedExportBans['${buyerC.id}:$rType'] ??
+                            false))) {
+                  continue;
+                }
+
+                String sellerCur = sellerC.currencyName;
+                double tariff = buyerC.tariffs['${sellerC.id}:$rType'] ?? 0.0;
+                double poolOut = exchange.liquidityPool[sellerCur] ?? 1.0;
+
+                double estCost =
+                    latestClearingPrices[sellerC.id]! *
+                    (poolIn / poolOut) *
+                    (1 + tariff);
+
+                if (estCost < bestEstCost) {
+                  bestEstCost = estCost;
+                  bestSeller = sellerC;
+                }
               }
 
-              String sellerCur = sellerC.currencyName;
-              double tariff = buyerC.tariffs['${sellerC.id}:$rType'] ?? 0.0;
-              double poolOut = exchange.liquidityPool[sellerCur] ?? 1.0;
+              if (bestSeller != null) {
+                String sellerCur = bestSeller.currencyName;
+                double poolOut = exchange.liquidityPool[sellerCur] ?? 1.0;
+                double tariff =
+                    buyerC.tariffs['${bestSeller.id}:$rType'] ?? 0.0;
 
-              double estCost =
-                  sellerC.resources[rType]!.lastMarketPrice *
-                  (poolIn / poolOut) *
-                  (1 + tariff);
+                double localBudget = resident.wallet[buyerLocal] ?? 0.0;
+                if (rType != 'Food') localBudget *= 0.3;
 
-              if (estCost < bestEstCost) {
-                bestEstCost = estCost;
-                bestSeller = sellerC;
+                double wtpS = 0.0;
+                if (buyerLocal == sellerCur) {
+                  wtpS = localBudget / (1 + tariff);
+                } else {
+                  wtpS =
+                      (localBudget * poolOut) /
+                      (poolIn * (1 + tariff) + localBudget);
+                }
+
+                visitedCountries[resident]!.add(bestSeller.id);
+                marketBids[bestSeller.id]!.add({
+                  'resident': resident,
+                  'buyerC': buyerC,
+                  'wtpS': wtpS,
+                  'amount': requiredAmount,
+                  'rand': Random().nextDouble(),
+                });
               }
             }
+          }
+        }
 
-            if (bestSeller != null) {
-              String sellerCur = bestSeller.currencyName;
-              double poolOut = exchange.liquidityPool[sellerCur] ?? 1.0;
-              double tariff = buyerC.tariffs['${bestSeller.id}:$rType'] ?? 0.0;
+        // --- 売り手側の落札処理 ---
+        for (var sellerC in allCountries) {
+          await _yieldCpu();
+          String sellerCur = sellerC.currencyName;
+          var bids = marketBids[sellerC.id]!;
+          if (bids.isEmpty) continue;
 
-              double localBudget = resident.wallet[buyerLocal] ?? 0.0;
-              if (rType != 'Food') localBudget *= 0.3;
+          totalBiddersAcrossRounds[sellerC.id] =
+              totalBiddersAcrossRounds[sellerC.id]! + bids.length;
 
-              double wtpS = 0.0;
+          bids.sort((a, b) {
+            if (rType == 'Food' && sellerC.foodDomesticPriority) {
+              bool aIsDomestic = a['buyerC'].id == sellerC.id;
+              bool bIsDomestic = b['buyerC'].id == sellerC.id;
+              if (aIsDomestic && !bIsDomestic) return -1;
+              if (!aIsDomestic && bIsDomestic) return 1;
+            }
+            int cmp = b['wtpS'].compareTo(a['wtpS']);
+            if (cmp == 0) return a['rand'].compareTo(b['rand']);
+            return cmp;
+          });
+
+          var res = sellerC.resources[rType]!;
+          double reqAmt = rules.annualConsumption[rType] ?? 10.0;
+          int maxWinners = (res.availableAmount / reqAmt).floor();
+
+          double currentPriceS = latestClearingPrices[sellerC.id]!;
+          double clearingPriceS = currentPriceS;
+
+          if (bids.length > maxWinners && maxWinners > 0) {
+            clearingPriceS = max(1.0, bids[maxWinners - 1]['wtpS']);
+          } else {
+            clearingPriceS = max(1.0, min(currentPriceS, bids.last['wtpS']));
+          }
+          latestClearingPrices[sellerC.id] = clearingPriceS;
+
+          int winnersCount = 0;
+          for (var bid in bids) {
+            Resident buyer = bid['resident'];
+            Country buyerC = bid['buyerC'];
+            String buyerLocal = buyerC.currencyName;
+
+            if (winnersCount < maxWinners && bid['wtpS'] >= clearingPriceS) {
+              double P = clearingPriceS;
+              double shortage = max(0.0, P - (buyer.wallet[sellerCur] ?? 0.0));
+              double inputNeeded = 0.0;
+              double tariffAmt = 0.0;
+
               if (buyerLocal == sellerCur) {
-                wtpS = localBudget / (1 + tariff);
-              } else {
-                wtpS =
-                    (localBudget * poolOut) /
-                    (poolIn * (1 + tariff) + localBudget);
-              }
+                tariffAmt = P * (buyerC.tariffs['${sellerC.id}:$rType'] ?? 0.0);
+                inputNeeded = P;
+                if ((buyer.wallet[buyerLocal] ?? 0.0) >=
+                    inputNeeded + tariffAmt) {
+                  buyer.wallet[buyerLocal] =
+                      buyer.wallet[buyerLocal]! - (inputNeeded + tariffAmt);
+                  sellerC.reserves[sellerCur] =
+                      (sellerC.reserves[sellerCur] ?? 0.0) + P;
+                  buyerC.reserves[buyerLocal] =
+                      (buyerC.reserves[buyerLocal] ?? 0.0) + tariffAmt;
 
-              marketBids[bestSeller.id]!.add({
-                'resident': resident,
-                'buyerC': buyerC,
-                'wtpS': wtpS,
-                'amount': requiredAmount,
-                'rand': Random().nextDouble(),
-              });
+                  if (rType == 'Food') {
+                    foodObtainedRatios[buyer] = qualityMultiplier;
+                  }
+
+                  _executeTradeSuccess(
+                    buyer,
+                    buyerC,
+                    sellerC,
+                    res,
+                    rType,
+                    reqAmt,
+                    inputNeeded + tariffAmt,
+                    P,
+                    round,
+                    qualityMultiplier,
+                  );
+                  securedResidents.add(buyer);
+                  winnersCount++;
+                } else {
+                  _executeTradeFailure(buyer, rType, sellerC, round);
+                }
+              } else {
+                double poolIn = exchange.liquidityPool[buyerLocal] ?? 1.0;
+                double poolOut = exchange.liquidityPool[sellerCur] ?? 1.0;
+
+                if (shortage > 0) {
+                  if (poolOut <= shortage) continue;
+                  inputNeeded = (poolIn * shortage) / (poolOut - shortage);
+                }
+
+                double tariffRate =
+                    buyerC.tariffs['${sellerC.id}:$rType'] ?? 0.0;
+                double fullLocalEq = (poolIn * P) / (poolOut - P);
+                tariffAmt = fullLocalEq * tariffRate;
+
+                if ((buyer.wallet[buyerLocal] ?? 0.0) >=
+                    inputNeeded + tariffAmt) {
+                  buyer.wallet[buyerLocal] =
+                      buyer.wallet[buyerLocal]! - (inputNeeded + tariffAmt);
+                  if (P - shortage > 0) {
+                    buyer.wallet[sellerCur] =
+                        buyer.wallet[sellerCur]! - (P - shortage);
+                  }
+
+                  if (shortage > 0) {
+                    exchange.liquidityPool[buyerLocal] =
+                        exchange.liquidityPool[buyerLocal]! + inputNeeded;
+                    exchange.liquidityPool[sellerCur] =
+                        exchange.liquidityPool[sellerCur]! - shortage;
+                  }
+
+                  sellerC.reserves[sellerCur] =
+                      (sellerC.reserves[sellerCur] ?? 0.0) + P;
+                  buyerC.reserves[buyerLocal] =
+                      (buyerC.reserves[buyerLocal] ?? 0.0) + tariffAmt;
+
+                  String impKey = "${sellerC.id}:$rType";
+                  buyerC.importLedger[impKey] =
+                      (buyerC.importLedger[impKey] ?? 0.0) + P;
+                  String expKey = "${buyerC.id}:$rType";
+                  sellerC.exportLedger[expKey] =
+                      (sellerC.exportLedger[expKey] ?? 0.0) + P;
+
+                  double tradePoints = 0.0;
+                  if (rType == 'Food')
+                    tradePoints = reqAmt * 10.0;
+                  else if (rType == 'Wood')
+                    tradePoints = reqAmt * 20.0;
+                  else if (rType == 'Metal')
+                    tradePoints = reqAmt * 50.0;
+                  else if (rType == 'Oil')
+                    tradePoints = reqAmt * 100.0;
+
+                  realGrossTradeVolumes[buyerC.id] =
+                      (realGrossTradeVolumes[buyerC.id] ?? 0.0) + tradePoints;
+                  realGrossTradeVolumes[sellerC.id] =
+                      (realGrossTradeVolumes[sellerC.id] ?? 0.0) + tradePoints;
+
+                  if (rType == 'Food') {
+                    foodObtainedRatios[buyer] = qualityMultiplier;
+                  }
+
+                  _executeTradeSuccess(
+                    buyer,
+                    buyerC,
+                    sellerC,
+                    res,
+                    rType,
+                    reqAmt,
+                    inputNeeded + tariffAmt,
+                    P,
+                    round,
+                    qualityMultiplier,
+                  );
+                  securedResidents.add(buyer);
+                  winnersCount++;
+                } else {
+                  _executeTradeFailure(buyer, rType, sellerC, round);
+                }
+              }
             } else {
-              resident.lastYearActivities.add(
-                "Failed to bid for $rType (No stock available globally).",
+              buyer.lastYearActivities.add(
+                "Outbid for $rType in ${sellerC.name} (Round $round). Bid: ${bid['wtpS'].toStringAsFixed(1)}, Cleared at: ${clearingPriceS.toStringAsFixed(1)} ${sellerC.currencyName}.",
               );
-              if (rType == 'Food') resident.weight -= 5.0;
+            }
+          }
+        }
+      } // 全ラウンド終了
+
+      // --- ラウンド終了後の全体判定＆ペナルティ付与＆体重計算 ---
+      for (var buyerC in allCountries) {
+        for (var resident in buyerC.residents) {
+          bool wantedToBuy = visitedCountries[resident]?.isNotEmpty ?? false;
+
+          if (rType == 'Food') {
+            // 食料の体重増減計算（線形補間）
+            double ratio = foodObtainedRatios[resident] ?? 0.0; // 買えなかった人は 0.0
+            double weightRange = foodWeightLossMax + foodWeightGainMax;
+            double weightChange = -foodWeightLossMax + (weightRange * ratio);
+
+            resident.weight = min(70.0, resident.weight + weightChange);
+
+            if (ratio == 0.0) {
+              resident.lastYearActivities.add(
+                "Ended up totally empty-handed for Food. Lost ${foodWeightLossMax.toStringAsFixed(1)}kg due to starvation. Dark times.",
+              );
+            } else if (weightChange < 0.0) {
+              // 補間計算の結果、体重が減少した場合（粗悪品の摂取）
+              resident.lastYearActivities.add(
+                "Survived on low-quality Food. Lost ${weightChange.abs().toStringAsFixed(1)}kg.",
+              );
+            }
+          } else {
+            // Food以外の空振りペナルティ判定
+            if (wantedToBuy &&
+                !visitedCountries[resident]!.contains('STARVING') &&
+                !securedResidents.contains(resident)) {
+              resident.lastYearActivities.add(
+                "Ended up totally empty-handed for $rType after $maxRounds grueling bidding rounds. Supply chains are brutal.",
+              );
             }
           }
         }
       }
 
-      // 落札処理とAMMスワップ実行
+      // --- 価格更新処理 ---
       for (var sellerC in allCountries) {
-        await _yieldCpu();
-        String sellerCur = sellerC.currencyName;
-        var bids = marketBids[sellerC.id]!;
-
-        bids.sort((a, b) {
-          if (rType == 'Food' && sellerC.foodDomesticPriority) {
-            bool aIsDomestic = a['buyerC'].id == sellerC.id;
-            bool bIsDomestic = b['buyerC'].id == sellerC.id;
-
-            if (aIsDomestic && !bIsDomestic) return -1;
-            if (!aIsDomestic && bIsDomestic) return 1;
-          }
-
-          int cmp = b['wtpS'].compareTo(a['wtpS']);
-          if (cmp == 0) return a['rand'].compareTo(b['rand']);
-          return cmp;
-        });
-
         var res = sellerC.resources[rType]!;
+        double clearingPriceAll = latestClearingPrices[sellerC.id]!;
 
-        // 落札・消費される量を設定モデルから取得
-        double reqAmt = rules.annualConsumption[rType] ?? 10.0;
-        int maxWinners = (res.availableAmount / reqAmt).floor();
-
-        double clearingPriceS = res.lastMarketPrice;
-        if (bids.isNotEmpty) {
-          if (bids.length > maxWinners && maxWinners > 0) {
-            // 競争がある場合：落札ラインぎりぎりの限界価格を採用
-            clearingPriceS = max(1.0, bids[maxWinners - 1]['wtpS']);
-          } else {
-            // 供給過剰（全員落札可能）な場合：独占高値を防ぐため、最低WTPか前回価格の安い方を採用
-            clearingPriceS = max(
-              1.0,
-              min(res.lastMarketPrice, bids.last['wtpS']),
-            );
-          }
-        } else {
-          // 誰も買わなかった場合は暴落
+        // 全ラウンドを通じて入札がゼロなら価格暴落
+        if (totalBiddersAcrossRounds[sellerC.id] == 0) {
           double fallRate = (rType == 'Food') ? 0.01 : 0.50;
-          clearingPriceS = max(1.0, clearingPriceS * fallRate);
+          clearingPriceAll = max(1.0, clearingPriceAll * fallRate);
         }
 
-        res.lastMarketPrice = clearingPriceS;
+        double production = res.annualProduction;
+        double surplus = res.availableAmount;
+        double surplusRatio = (production > 0) ? (surplus / production) : 0.0;
+        surplusRatio = min(0.99, surplusRatio);
 
-        int winnersCount = 0;
-        for (var bid in bids) {
-          Resident buyer = bid['resident'];
-          Country buyerC = bid['buyerC'];
-          String buyerLocal = buyerC.currencyName;
-
-          if (winnersCount < maxWinners && bid['wtpS'] >= clearingPriceS) {
-            double P = clearingPriceS;
-            double shortage = max(0.0, P - (buyer.wallet[sellerCur] ?? 0.0));
-
-            double inputNeeded = 0.0;
-            double tariffAmt = 0.0;
-
-            if (buyerLocal == sellerCur) {
-              tariffAmt = P * (buyerC.tariffs['${sellerC.id}:$rType'] ?? 0.0);
-              inputNeeded = P;
-              if ((buyer.wallet[buyerLocal] ?? 0.0) >=
-                  inputNeeded + tariffAmt) {
-                buyer.wallet[buyerLocal] =
-                    buyer.wallet[buyerLocal]! - (inputNeeded + tariffAmt);
-                sellerC.reserves[sellerCur] =
-                    (sellerC.reserves[sellerCur] ?? 0.0) + P;
-                buyerC.reserves[buyerLocal] =
-                    (buyerC.reserves[buyerLocal] ?? 0.0) + tariffAmt;
-                _executeTradeSuccess(
-                  buyer,
-                  buyerC,
-                  sellerC,
-                  res,
-                  rType,
-                  reqAmt,
-                  inputNeeded + tariffAmt,
-                  P,
-                  winnersCount,
-                );
-                securedResidents.add(buyer);
-                winnersCount++;
-              } else {
-                _executeTradeFailure(buyer, rType, sellerC);
-              }
-            } else {
-              double poolIn = exchange.liquidityPool[buyerLocal] ?? 1.0;
-              double poolOut = exchange.liquidityPool[sellerCur] ?? 1.0;
-
-              if (shortage > 0) {
-                if (poolOut <= shortage) continue;
-                inputNeeded = (poolIn * shortage) / (poolOut - shortage);
-              }
-
-              double tariffRate = buyerC.tariffs['${sellerC.id}:$rType'] ?? 0.0;
-              double fullLocalEq = (poolIn * P) / (poolOut - P);
-              tariffAmt = fullLocalEq * tariffRate;
-
-              if ((buyer.wallet[buyerLocal] ?? 0.0) >=
-                  inputNeeded + tariffAmt) {
-                buyer.wallet[buyerLocal] =
-                    buyer.wallet[buyerLocal]! - (inputNeeded + tariffAmt);
-                if (P - shortage > 0) {
-                  buyer.wallet[sellerCur] =
-                      buyer.wallet[sellerCur]! - (P - shortage);
-                }
-
-                if (shortage > 0) {
-                  exchange.liquidityPool[buyerLocal] =
-                      exchange.liquidityPool[buyerLocal]! + inputNeeded;
-                  exchange.liquidityPool[sellerCur] =
-                      exchange.liquidityPool[sellerCur]! - shortage;
-                }
-
-                sellerC.reserves[sellerCur] =
-                    (sellerC.reserves[sellerCur] ?? 0.0) + P;
-                buyerC.reserves[buyerLocal] =
-                    (buyerC.reserves[buyerLocal] ?? 0.0) + tariffAmt;
-
-                String impKey = "${sellerC.id}:$rType";
-                buyerC.importLedger[impKey] =
-                    (buyerC.importLedger[impKey] ?? 0.0) + P;
-                String expKey = "${buyerC.id}:$rType";
-                sellerC.exportLedger[expKey] =
-                    (sellerC.exportLedger[expKey] ?? 0.0) + P;
-
-                double tradePoints = 0.0;
-                if (rType == 'Food')
-                  tradePoints = reqAmt * 10.0;
-                else if (rType == 'Wood')
-                  tradePoints = reqAmt * 20.0;
-                else if (rType == 'Metal')
-                  tradePoints = reqAmt * 50.0;
-                else if (rType == 'Oil')
-                  tradePoints = reqAmt * 100.0;
-
-                realGrossTradeVolumes[buyerC.id] =
-                    (realGrossTradeVolumes[buyerC.id] ?? 0.0) + tradePoints;
-                realGrossTradeVolumes[sellerC.id] =
-                    (realGrossTradeVolumes[sellerC.id] ?? 0.0) + tradePoints;
-
-                _executeTradeSuccess(
-                  buyer,
-                  buyerC,
-                  sellerC,
-                  res,
-                  rType,
-                  reqAmt,
-                  inputNeeded + tariffAmt,
-                  P,
-                  winnersCount,
-                );
-                securedResidents.add(buyer);
-                winnersCount++;
-              } else {
-                _executeTradeFailure(buyer, rType, sellerC);
-              }
-            }
-          } else {
-            buyer.lastYearActivities.add(
-              "Lost bid for $rType in ${sellerC.name}. Bid: ${bid['wtpS'].toStringAsFixed(1)}, Market: ${clearingPriceS.toStringAsFixed(1)} ${sellerC.currencyName}.",
-            );
-            if (rType == 'Food') buyer.weight -= 5.0;
-          }
-        }
-
-        if (rType == 'Food') {
-          List<Map<String, dynamic>> round2Bids = [];
-          double tariffRate = sellerC.tariffs['${sellerC.id}:$rType'] ?? 0.0;
-          double clearingPriceS2 = 0.0;
-
-          for (var resident in sellerC.residents) {
-            if (securedResidents.contains(resident)) continue;
-
-            double localBudget = resident.wallet[sellerCur] ?? 0.0;
-            double wtpS = localBudget / (1 + tariffRate);
-
-            round2Bids.add({
-              'resident': resident,
-              'wtpS': wtpS,
-              'rand': Random().nextDouble(),
-            });
-          }
-
-          if (round2Bids.isNotEmpty && res.availableAmount >= reqAmt) {
-            round2Bids.sort((a, b) {
-              int cmp = b['wtpS'].compareTo(a['wtpS']);
-              if (cmp == 0) return a['rand'].compareTo(b['rand']);
-              return cmp;
-            });
-
-            int maxWinners2 = (res.availableAmount / reqAmt).floor();
-
-            if (round2Bids.length > maxWinners2 && maxWinners2 > 0) {
-              clearingPriceS2 = max(1.0, round2Bids[maxWinners2 - 1]['wtpS']);
-            } else {
-              clearingPriceS2 = max(
-                1.0,
-                min(clearingPriceS, round2Bids.last['wtpS']),
-              );
-            }
-
-            clearingPriceS2 = min(clearingPriceS, clearingPriceS2);
-
-            for (var bid in round2Bids) {
-              if (res.availableAmount < reqAmt) break;
-
-              Resident resident = bid['resident'];
-              if (bid['wtpS'] >= clearingPriceS2) {
-                double P = clearingPriceS2;
-                double tariffAmt = P * tariffRate;
-                double totalCost = P + tariffAmt;
-
-                if ((resident.wallet[sellerCur] ?? 0.0) >= totalCost) {
-                  resident.wallet[sellerCur] =
-                      resident.wallet[sellerCur]! - totalCost;
-                  sellerC.reserves[sellerCur] =
-                      (sellerC.reserves[sellerCur] ?? 0.0) + totalCost;
-
-                  _executeTradeSuccess(
-                    resident,
-                    sellerC,
-                    sellerC,
-                    res,
-                    rType,
-                    reqAmt,
-                    totalCost,
-                    P,
-                    winnersCount,
-                  );
-                  securedResidents.add(resident);
-                  resident.weight = min(70.0, resident.weight + 5.0);
-                  winnersCount++;
-                }
-              }
-            }
-          }
-
-          double clearingPriceAll = clearingPriceS2 > 0.0
-              ? clearingPriceS2
-              : clearingPriceS;
-          double production = res.annualProduction;
-          double surplus = res.availableAmount;
-          double surplusRatio = (production > 0) ? (surplus / production) : 0.0;
-          surplusRatio = min(0.99, surplusRatio);
-
-          double surplusBasedPrice = clearingPriceAll * (1.0 - surplusRatio);
-
-          res.lastMarketPrice = max(
-            1.0,
-            min(clearingPriceAll, surplusBasedPrice),
-          );
-        }
+        // 売れ残り比率に応じた割引
+        double surplusBasedPrice = clearingPriceAll * (1.0 - surplusRatio);
+        res.lastMarketPrice = max(
+          1.0,
+          min(clearingPriceAll, surplusBasedPrice),
+        );
       }
     }
 
@@ -685,7 +747,6 @@ class SimulationEngine extends ChangeNotifier {
 
       double currentAmmLiquidity =
           exchange.liquidityPool[c.currencyName] ?? 0.0;
-
       double totalExp = c.exportLedger.values.fold(0.0, (a, b) => a + b);
       double totalImp = c.importLedger.values.fold(0.0, (a, b) => a + b);
       double netTradeBal = totalExp - totalImp;
@@ -713,28 +774,26 @@ class SimulationEngine extends ChangeNotifier {
       List<double> hwiScores = [];
       for (int i = 0; i < c.residents.length; i++) {
         Resident r = c.residents[i];
-
         double stockScore =
-            (r.woodStock * 20.0) + (r.metalStock * 50.0) + (r.oilStock * 100.0);
+            (r.woodStock * dynWoodWeight) +
+            (r.metalStock * dynMetalWeight) +
+            (r.oilStock * dynOilWeight);
         double healthScore = max(0.0, (r.weight - 50.0) * 100.0);
         double ratio = avgFinWealth > 0.0
             ? (financialWealths[i] / avgFinWealth)
             : 0.0;
         double financialScore = 1000.0 * (log(1.0 + max(0.0, ratio)) / ln2);
-
         double totalHwi = max(0.0, stockScore + healthScore + financialScore);
         hwiScores.add(totalHwi);
       }
 
       hwiScores.sort();
       double totalHwiSum = hwiScores.fold(0.0, (a, b) => a + b);
-
       double avgHwi = hwiScores.isNotEmpty
           ? totalHwiSum / hwiScores.length
           : 0.0;
 
       double gini = 0.0;
-
       if (totalHwiSum > 0 && hwiScores.isNotEmpty) {
         int n = hwiScores.length;
         double sumNumerator = 0.0;
@@ -745,7 +804,6 @@ class SimulationEngine extends ChangeNotifier {
         gini = min(1.0, max(0.0, gini));
       }
 
-      // ★追加: ターン終了時の各資源の市場在庫量を記録
       c.history.add(
         YearlyMetrics(
           year: currentYear,
@@ -773,7 +831,6 @@ class SimulationEngine extends ChangeNotifier {
       if (c.history.length > 100) {
         c.history.removeAt(0);
       }
-
       c.save();
     }
 
@@ -799,31 +856,41 @@ class SimulationEngine extends ChangeNotifier {
     double reqAmt,
     double totalCostLocal,
     double marketPriceForeign,
-    int winnersCount,
+    int round,
+    double qualityMultiplier,
   ) {
+    // 在庫は品質に関わらず正規の量が引かれる（不良品も在庫として消費）
     res.availableAmount -= reqAmt;
-    if (rType == 'Food')
-      buyer.weight = min(70.0, buyer.weight + 2.0);
-    else if (rType == 'Wood')
-      buyer.woodStock += reqAmt;
+
+    // 実際に住民の手に入る量は品質デバフを適用
+    if (rType == 'Wood')
+      buyer.woodStock += reqAmt * qualityMultiplier;
     else if (rType == 'Metal')
-      buyer.metalStock += reqAmt;
+      buyer.metalStock += reqAmt * qualityMultiplier;
     else if (rType == 'Oil')
-      buyer.oilStock += reqAmt;
+      buyer.oilStock += reqAmt * qualityMultiplier;
 
     String tradeType = (buyerC.id == sellerC.id)
         ? "locally"
         : "from ${sellerC.name}";
+    String qualityNote = qualityMultiplier < 1.0
+        ? " (Quality: ${(qualityMultiplier * 100).toInt()}%)"
+        : "";
+
     buyer.lastYearActivities.add(
-      "Bought $rType $tradeType for approx ${totalCostLocal.toStringAsFixed(1)} ${buyerC.currencyName} (Market: ${marketPriceForeign.toStringAsFixed(1)} ${sellerC.currencyName}).",
+      "Scored $rType $tradeType in Round $round$qualityNote for approx ${totalCostLocal.toStringAsFixed(1)} ${buyerC.currencyName} (Market: ${marketPriceForeign.toStringAsFixed(1)} ${sellerC.currencyName}).",
     );
   }
 
-  void _executeTradeFailure(Resident buyer, String rType, Country sellerC) {
+  void _executeTradeFailure(
+    Resident buyer,
+    String rType,
+    Country sellerC,
+    int round,
+  ) {
     buyer.lastYearActivities.add(
-      "Failed to buy $rType from ${sellerC.name} (Insufficient post-swap funds).",
+      "Card declined! Insufficient post-swap funds to buy $rType from ${sellerC.name} (Round $round). Currency slippage hurts.",
     );
-    if (rType == 'Food') buyer.weight -= 5.0;
   }
 
   void applyHelicopterMoney(Country c, double amount) {
@@ -864,6 +931,23 @@ class SimulationEngine extends ChangeNotifier {
     String status = isBanned ? "banned" : "allowed";
     logUserAction(
       'Policy Update: ${c.name} has $status the export of $resType.',
+    );
+    notifyListeners();
+  }
+
+  void updateTargetedExportBan(
+    Country from,
+    Country to,
+    String resType,
+    bool isBanned,
+  ) {
+    String key = '${to.id}:$resType';
+    from.targetedExportBans[key] = isBanned;
+    from.save();
+
+    String action = isBanned ? "embargoed" : "lifted the embargo on";
+    logUserAction(
+      'Sanctions Update: ${from.name} has $action $resType exports to ${to.name}.',
     );
     notifyListeners();
   }
@@ -912,7 +996,6 @@ class SimulationEngine extends ChangeNotifier {
 
     if (poolIn <= 0 || poolOut <= 0 || amount <= 0) return;
 
-    // フェイルセーフ: 政府の金庫にある売却通貨の在庫チェック
     double currentReserveSrc = c.reserves[sourceCur] ?? 0.0;
     if (amount > currentReserveSrc) {
       amount = currentReserveSrc;
@@ -920,30 +1003,21 @@ class SimulationEngine extends ChangeNotifier {
 
     if (amount <= 0) return;
 
-    // AMM定数積モデル (X * Y = K) に基づくスワップ取得額の逆算
-    // Delta Y = (Y * Delta X) / (X + Delta X)
     double outAmount = (poolOut * amount) / (poolIn + amount);
-
-    // フェイルセーフ: 両替所（AMM）の枯渇回避（最大でもプールの99%に抑える）
     if (outAmount >= poolOut) {
       outAmount = poolOut * 0.99;
     }
 
     if (outAmount <= 0) return;
 
-    // 政府の金庫（Reserves）の更新
     c.reserves[sourceCur] = currentReserveSrc - amount;
     c.reserves[targetCur] = (c.reserves[targetCur] ?? 0.0) + outAmount;
-
-    // 地球共通両替所（AMM）プールの更新
     exchange.liquidityPool[sourceCur] = poolIn + amount;
     exchange.liquidityPool[targetCur] = poolOut - outAmount;
 
-    // データの保存
     c.save();
     exchange.save();
 
-    // ログの記録
     String interventionType = (sourceCur == c.currencyName)
         ? "Devaluation (Export Boost)"
         : "Revaluation (Value Protection)";
@@ -967,7 +1041,6 @@ class SimulationEngine extends ChangeNotifier {
     });
     b.writeln('--------------------------------------');
 
-    // 出力用のリアルタイムUSDプールの取得
     double poolUsd = exchange.liquidityPool['USD'] ?? 1.0;
 
     for (var c in countries) {
@@ -977,7 +1050,6 @@ class SimulationEngine extends ChangeNotifier {
           c.residents.map((e) => e.civilizationLevel).reduce((a, b) => a + b) /
           10;
 
-      // コピー出力用のテキストでもリアルタイムの為替レートを計算する
       double poolLocal = exchange.liquidityPool[c.currencyName] ?? 1.0;
       double liveCurrencyIndex = poolLocal > 0 ? (poolUsd / poolLocal) : 0.0;
 
