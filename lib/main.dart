@@ -617,14 +617,31 @@ class DashboardScreen extends StatelessWidget {
                     giniColor = Colors.orangeAccent; // 警戒水域
                   }
 
-                  // 輸出禁止されている品目の文字列生成
+                  // 全世界共通の輸出禁止されている品目の文字列生成
                   String bannedItems = c.exportBans.entries
                       .where((e) => e.value)
                       .map((e) => e.key)
                       .join(', ');
                   if (bannedItems.isEmpty) bannedItems = "None";
 
-                  // ★追加・変更: ダッシュボード上で流動性プールからリアルタイムの対USDレートを計算する
+                  // ターゲット国指定の輸出禁止措置（Targeted Export Bans）の文字列生成
+                  String targetedBannedItems = c.targetedExportBans.entries
+                      .where((e) => e.value)
+                      .map((e) {
+                        var parts = e.key.split(':');
+                        if (parts.length == 2) {
+                          var targetCountry = engine.countries.firstWhere(
+                            (x) => x.id == parts[0],
+                            orElse: () => c,
+                          );
+                          return '${targetCountry.name} (${parts[1]})';
+                        }
+                        return e.key;
+                      })
+                      .join(', ');
+                  if (targetedBannedItems.isEmpty) targetedBannedItems = "None";
+
+                  // ダッシュボード上で流動性プールからリアルタイムの対USDレートを計算する
                   double poolUsd =
                       engine.globalExchange.liquidityPool['USD'] ?? 1.0;
                   double poolLocal =
@@ -660,7 +677,6 @@ class DashboardScreen extends StatelessWidget {
                               ),
                               Flexible(
                                 child: SelectableText(
-                                  // ★変更: 古い c.currencyIndex ではなく、計算した liveCurrencyIndex を表示
                                   'C. Index: ${liveCurrencyIndex.toStringAsFixed(4)}\n(vs USD)',
                                   style: const TextStyle(
                                     color: Colors.cyanAccent,
@@ -838,17 +854,39 @@ class DashboardScreen extends StatelessWidget {
                                     ),
                                     const SizedBox(width: 4),
                                     Expanded(
-                                      child: Text(
-                                        'Export Bans: $bannedItems',
-                                        style: TextStyle(
-                                          fontSize: 13,
-                                          color: bannedItems == "None"
-                                              ? Colors.white54
-                                              : Colors.redAccent,
-                                          fontWeight: bannedItems == "None"
-                                              ? FontWeight.normal
-                                              : FontWeight.bold,
-                                        ),
+                                      // ★ Columnに変更して文字サイズが大きくても折り返すように調整
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            'Global Bans: $bannedItems',
+                                            style: TextStyle(
+                                              fontSize: 13,
+                                              color: bannedItems == "None"
+                                                  ? Colors.white54
+                                                  : Colors.redAccent,
+                                              fontWeight: bannedItems == "None"
+                                                  ? FontWeight.normal
+                                                  : FontWeight.bold,
+                                            ),
+                                          ),
+                                          const SizedBox(height: 2),
+                                          Text(
+                                            'Targeted Bans: $targetedBannedItems',
+                                            style: TextStyle(
+                                              fontSize: 13,
+                                              color:
+                                                  targetedBannedItems == "None"
+                                                  ? Colors.white54
+                                                  : Colors.redAccent,
+                                              fontWeight:
+                                                  targetedBannedItems == "None"
+                                                  ? FontWeight.normal
+                                                  : FontWeight.bold,
+                                            ),
+                                          ),
+                                        ],
                                       ),
                                     ),
                                   ],

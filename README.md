@@ -140,6 +140,15 @@ This project is licensed under the MIT License - see the source files for detail
 
 ## 🔄 Changelog
 
+### v1.0.6
+- **Added Clear Inventory Feature (Advance Edit):** Added a function to the Advanced Edit screen that resets the inventories of all nations and all citizens to zero for each of the three resources: Wood, Metal, and Oil.
+- **Added License List Link:** Placed a link to the License List screen at the bottom of the Rules screen.
+
+### v1.0.5
+- **Enhanced Dashboard UI:** Added real-time visibility for "Targeted Export Bans" directly on each country's dashboard card. The layout has also been optimized with flexible text wrapping to prevent UI overflow errors on devices using larger accessibility font scales.
+- **Updated In-Game Rules:** Completely revised the "Rules & Specifications" screen (in both English and Japanese) to accurately describe the latest multi-round auction mechanics. It now explicitly details the 4th-round domestic bailout system for food, starvation penalties, and quality multiplier debuffs, while removing outdated descriptions.
+- **Fixed Domestic Bailout Logic:** Resolved a critical bug in the 4th-round food auction where residents were unintentionally blocked from participating in the domestic bailout if they had already bid and lost in their home market during Rounds 1-3.
+
 ### v1.0.4
 - **Supply Chain Degradation:** Introduced resource quality debuffs in the multi-round auction system. Procuring resources in later bidding rounds now yields reduced effective quantities (e.g., 85% in Round 2, 70% in Round 3), simulating the harsh realities of secondary markets and economic sanctions.
 - **Gradual Starvation Model:** Overhauled the resident weight management logic. Weight gain/loss is now calculated continuously using linear interpolation based on the food fulfillment ratio, allowing for highly realistic simulations of chronic malnutrition and gradual physical decline.

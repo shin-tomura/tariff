@@ -50,7 +50,9 @@ class _RulesScreenState extends State<RulesScreen> {
         'Government foreign reserves are accumulated ONLY through "Currency Interventions" (selling local currency to buy foreign currency via the AMM).',
         'UBI is distributed strictly in local currency. The government cannot distribute foreign reserves to its residents.',
         'Physical assets (Wood, Metal, Oil) confiscated via inheritance tax are fully recycled into the domestic market supply.',
-        '"Food Domestic Priority" unconditionally prioritizes domestic buyers in the 1st-round food auction. Regardless of this setting, a 2nd-round is always held for domestic residents if surplus food remains, securing it at a capped lower price.',
+        // ★修正点：最大4ラウンドの入札システムの説明に差し替え
+        'International auctions are conducted in up to 4 rounds. Residents search for the lowest price globally in Rounds 1-3. If they fail to secure Food by Round 3, a final 4th Round acts as a domestic bailout (buying from local stock if available).',
+        'There are severe penalties for failing to procure resources. Specifically for Food, failing to buy leads to significant weight loss (starvation). Additionally, goods acquired in later rounds suffer a "Quality Multiplier" debuff, providing less actual value than paid for.',
       ];
     } else {
       return [
@@ -59,7 +61,9 @@ class _RulesScreenState extends State<RulesScreen> {
         '政府の外貨準備高は、AMMで自国通貨を売り外貨を買う「為替介入」によってのみ蓄積される。',
         '住民に支給されるUBIは自国通貨に限定され、政府の外貨準備を直接分配することはできない。',
         '相続税で没収された実物資産は消失せず、すべて国内市場の在庫に還元される。',
-        '「Food Domestic Priority」有効時は第1ラウンドで自国民が絶対優先される。また設定に関わらず、食料に余剰があれば常に自国民向けの第2ラウンド入札が実施され、安値で保護される。',
+        // ★修正点：最大4ラウンドの入札システムの説明に差し替え
+        '国際オークションは最大4ラウンド制で行われる。第1〜3ラウンドは世界中から最も安い入札先を探すが、食料のみ第4ラウンドが用意されており、買えなかった住民が自国市場に泣きつく「自国救済措置」が発動する。',
+        '資源を落札できなかった場合は厳しいペナルティが課される。特に食料を買えなかった住民は大きく体重が減少し餓死に近づく。また、遅いラウンドで落札した資源は「品質デバフ」が適用され、支払った金額に対して実際に得られる価値が減少する。',
       ];
     }
   }
@@ -191,6 +195,37 @@ class _RulesScreenState extends State<RulesScreen> {
           ),
           const SizedBox(height: 16),
           ...rules.map((item) => _buildListItem(item)),
+
+          // --- ここからライセンス表示用の追加コード ---
+          const SizedBox(height: 32),
+          const Divider(color: Colors.white24, thickness: 2),
+          const SizedBox(height: 16),
+          Center(
+            child: TextButton.icon(
+              icon: const Icon(Icons.policy_outlined, color: Colors.cyanAccent),
+              label: Text(
+                _isEnglish ? 'Open Source Licenses' : 'オープンソースライセンス',
+                style: const TextStyle(
+                  color: Colors.cyanAccent,
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              onPressed: () {
+                // Flutter標準のライセンス一覧画面を表示
+                showLicensePage(
+                  context: context,
+                  applicationName: 'Hakoniwa Tariff',
+                  applicationVersion: '1.0.6',
+                  applicationLegalese: _isEnglish
+                      ? 'Released under the MIT License'
+                      : 'MITライセンスの下で公開されています',
+                );
+              },
+            ),
+          ),
+          const SizedBox(height: 24),
+          // --- 追加コードここまで ---
         ],
       ),
     );

@@ -16,6 +16,9 @@ class _AdvancedEditScreenState extends State<AdvancedEditScreen> {
   String? _selectedResourceType;
   Resident? _selectedResident;
 
+  // 一括在庫消去用の選択資源リポジトリ
+  String? _wipeResource;
+
   final _availAmtCtrl = TextEditingController();
   final _annualProdCtrl = TextEditingController();
   final _lastMarketPriceCtrl = TextEditingController();
@@ -32,7 +35,7 @@ class _AdvancedEditScreenState extends State<AdvancedEditScreen> {
   // 両替所の流動性プール編集用コントローラー
   final Map<String, TextEditingController> _poolCtrls = {};
 
-  // ★追加: シミュレーションルール編集用コントローラー
+  // シミュレーションルール編集用コントローラー
   final Map<String, TextEditingController> _annualConsCtrls = {};
   final Map<String, TextEditingController> _resDepCtrls = {};
   final Map<String, TextEditingController> _ctyDepCtrls = {};
@@ -112,7 +115,7 @@ class _AdvancedEditScreenState extends State<AdvancedEditScreen> {
     setState(() {});
   }
 
-  // ★追加: シミュレーションルールの読み込み
+  // シミュレーションルールの読み込み
   void _loadSimulationRules() {
     var settings = Hive.box('settings');
     SimulationSettings rules =
@@ -126,6 +129,95 @@ class _AdvancedEditScreenState extends State<AdvancedEditScreen> {
           .toStringAsFixed(2);
     }
     setState(() {});
+  }
+
+  // 全国家・全市民の対象資源の在庫をゼロにする処理
+  void _wipeResourceStocks(SimulationEngine engine) {
+    if (_wipeResource == null) return;
+    final String res = _wipeResource!;
+    int countryCount = 0;
+    int residentCount = 0;
+
+    for (var c in engine.countries) {
+      // 国家の市場・政府在庫の消去
+      if (c.resources.containsKey(res)) {
+        c.resources[res]!.availableAmount = 0.0;
+        c.save();
+        countryCount++;
+      }
+
+      // 所属する全市民の個人備蓄の消去
+      for (var r in c.residents) {
+        bool updated = false;
+        if (res == 'Wood') {
+          r.woodStock = 0.0;
+          updated = true;
+        } else if (res == 'Metal') {
+          r.metalStock = 0.0;
+          updated = true;
+        } else if (res == 'Oil') {
+          r.oilStock = 0.0;
+          updated = true;
+        }
+
+        if (updated) {
+          r.save();
+          residentCount++;
+        }
+      }
+    }
+
+    // 操作ログの記録と状態通知
+    engine.logUserAction(
+      'God Mode [Global Wipe]: Wiped all $res stocks to 0 for $countryCount countries and $residentCount residents.',
+    );
+    engine.notifyListeners();
+
+    // 完了通知
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('All $res stocks inside the world have been wiped to 0!'),
+      ),
+    );
+
+    setState(() {
+      _wipeResource = null; // 実行後に選択状態をクリア
+    });
+  }
+
+  // 誤操作を防ぐための確認ダイアログ
+  void _showWipeConfirmDialog(BuildContext context, SimulationEngine engine) {
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          title: Text('Wipe All $_wipeResource Stocks?'),
+          content: SingleChildScrollView(
+            child: Text(
+              'Are you sure you want to completely erase the $_wipeResource stock of ALL countries and ALL residents to 0?\n\nThis is an irreversible apocalyptic event for the economy.',
+              style: const TextStyle(fontSize: 14),
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.red[900]),
+              onPressed: () {
+                Navigator.pop(ctx);
+                _wipeResourceStocks(engine);
+              },
+              child: const Text(
+                'Execute Wipe',
+                style: TextStyle(color: Colors.white),
+              ),
+            ),
+          ],
+        );
+      },
+    );
   }
 
   void _saveChanges(SimulationEngine engine) {
@@ -228,7 +320,6 @@ class _AdvancedEditScreenState extends State<AdvancedEditScreen> {
         );
       }
     } else if (_editCategory == 'Simulation Rules') {
-      // ★追加: シミュレーションルールの保存
       var settings = Hive.box('settings');
       SimulationSettings rules =
           settings.get('sim_rules') ?? SimulationSettings();
@@ -241,7 +332,7 @@ class _AdvancedEditScreenState extends State<AdvancedEditScreen> {
 
         double oldResDep = rules.residentDepreciationRates[res] ?? 0.0;
         double nResDep = double.tryParse(_resDepCtrls[res]!.text) ?? oldResDep;
-        _checkNum('Resident Dep Rate ($res)', oldResDep, nResDep);
+        _checkNum('Resident Dev Rate ($res)', oldResDep, nResDep);
         rules.residentDepreciationRates[res] = nResDep;
 
         double oldCtyDep = rules.countryDepreciationRates[res] ?? 0.0;
@@ -279,6 +370,7 @@ class _AdvancedEditScreenState extends State<AdvancedEditScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // ターゲットカテゴリ選択ドロップダウン
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 12),
               decoration: BoxDecoration(
@@ -296,7 +388,8 @@ class _AdvancedEditScreenState extends State<AdvancedEditScreen> {
                             'Resident Base',
                             'Global Exchange',
                             'Global Settings',
-                            'Simulation Rules', // ★追加
+                            'Simulation Rules',
+                            'Global Wipe (Apocalypse)', // ★新規メニュー追加
                           ]
                           .map(
                             (e) => DropdownMenuItem(
@@ -317,13 +410,14 @@ class _AdvancedEditScreenState extends State<AdvancedEditScreen> {
                       _selectedCountry = null;
                       _selectedResourceType = null;
                       _selectedResident = null;
+                      _wipeResource = null; // メニュー切り替え時に在庫リセットの選択もクリア
 
                       if (_editCategory == 'Global Settings') {
                         _loadGlobalSettings();
                       } else if (_editCategory == 'Global Exchange') {
                         _loadGlobalExchangeData(engine);
                       } else if (_editCategory == 'Simulation Rules') {
-                        _loadSimulationRules(); // ★追加
+                        _loadSimulationRules();
                       }
                     });
                   },
@@ -331,6 +425,109 @@ class _AdvancedEditScreenState extends State<AdvancedEditScreen> {
               ),
             ),
             const SizedBox(height: 20),
+
+            // ★修正: 新設された「Global Wipe (Apocalypse)」メニュー選択時のみカードを表示
+            if (_editCategory == 'Global Wipe (Apocalypse)') ...[
+              Card(
+                color: Colors.red[900]?.withOpacity(0.15),
+                shape: RoundedRectangleBorder(
+                  side: BorderSide(color: Colors.red[700]!, width: 1.2),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(12.0),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: const [
+                          Icon(
+                            Icons.warning_amber_rounded,
+                            color: Colors.redAccent,
+                          ),
+                          SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              'Global Resource Apocalypse',
+                              style: TextStyle(
+                                color: Colors.redAccent,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 16,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      const Text(
+                        'Select a non-food resource to instantly reset its stock to 0 for ALL countries and ALL residents across the entire simulation.',
+                        style: TextStyle(color: Colors.white70, fontSize: 13),
+                      ),
+                      const SizedBox(height: 10),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 10),
+                        decoration: BoxDecoration(
+                          color: Colors.black38,
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: DropdownButtonHideUnderline(
+                          child: DropdownButton<String>(
+                            isExpanded: true,
+                            hint: const Text(
+                              'Select target resource to wipe out',
+                            ),
+                            value: _wipeResource,
+                            dropdownColor: Colors.blueGrey[900],
+                            items: ['Wood', 'Metal', 'Oil']
+                                .map(
+                                  (r) => DropdownMenuItem(
+                                    value: r,
+                                    child: Text(
+                                      r,
+                                      style: const TextStyle(
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ),
+                                )
+                                .toList(),
+                            onChanged: (val) => setState(() {
+                              _wipeResource = val;
+                            }),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton.icon(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.red[800],
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                          ),
+                          icon: const Icon(
+                            Icons.delete_forever,
+                            color: Colors.white,
+                          ),
+                          label: Text(
+                            _wipeResource != null
+                                ? 'Wipe ALL $_wipeResource Stock to 0'
+                                : 'Please select a resource',
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              color: Colors.white,
+                            ),
+                          ),
+                          onPressed: _wipeResource == null
+                              ? null
+                              : () => _showWipeConfirmDialog(context, engine),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
 
             if (_editCategory == 'Simulation Rules') ...[
               const Text(
@@ -514,7 +711,7 @@ class _AdvancedEditScreenState extends State<AdvancedEditScreen> {
                     _selectedResident != null) ||
                 (_editCategory == 'Global Exchange') ||
                 (_editCategory == 'Global Settings') ||
-                (_editCategory == 'Simulation Rules')) // ★追加
+                (_editCategory == 'Simulation Rules'))
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(

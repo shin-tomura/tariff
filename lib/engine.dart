@@ -403,23 +403,21 @@ class SimulationEngine extends ChangeNotifier {
 
             if (round == 4 && rType == 'Food') {
               // ラウンド4: 自国市場への泣きつき（国内在庫がある場合のみ）
-              if (!visitedCountries[resident]!.contains(buyerC.id)) {
-                double localAvailable =
-                    buyerC.resources[rType]!.availableAmount;
-                if (localAvailable >= requiredAmount) {
-                  double tariff = buyerC.tariffs['${buyerC.id}:$rType'] ?? 0.0;
-                  double localBudget = resident.wallet[buyerLocal] ?? 0.0;
-                  double wtpS = localBudget / (1 + tariff);
 
-                  visitedCountries[resident]!.add(buyerC.id);
-                  marketBids[buyerC.id]!.add({
-                    'resident': resident,
-                    'buyerC': buyerC,
-                    'wtpS': wtpS,
-                    'amount': requiredAmount,
-                    'rand': Random().nextDouble(),
-                  });
-                }
+              double localAvailable = buyerC.resources[rType]!.availableAmount;
+              if (localAvailable >= requiredAmount) {
+                double tariff = buyerC.tariffs['${buyerC.id}:$rType'] ?? 0.0;
+                double localBudget = resident.wallet[buyerLocal] ?? 0.0;
+                double wtpS = localBudget / (1 + tariff);
+
+                visitedCountries[resident]!.add(buyerC.id);
+                marketBids[buyerC.id]!.add({
+                  'resident': resident,
+                  'buyerC': buyerC,
+                  'wtpS': wtpS,
+                  'amount': requiredAmount,
+                  'rand': Random().nextDouble(),
+                });
               }
             } else if (round <= 3) {
               // ラウンド1-3: 未訪問の国から最も安く買えそうな場所を探す
